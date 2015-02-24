@@ -11,7 +11,7 @@
  *
  */
 #if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-#include <mach/socinfo.h>
+#include <soc/qcom/socinfo.h>
 #endif
 #include "msm_sensor.h"
 #define OV9726_SENSOR_NAME "ov9726"

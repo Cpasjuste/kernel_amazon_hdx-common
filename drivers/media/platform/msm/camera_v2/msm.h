@@ -18,7 +18,6 @@
 #include <linux/i2c.h>
 #include <linux/videodev2.h>
 #include <linux/pm_qos.h>
-#include <linux/wakelock.h>
 #include <linux/msm_ion.h>
 #include <linux/iommu.h>
 #include <media/v4l2-dev.h>
@@ -31,13 +30,13 @@
 #include <media/videobuf2-msm-mem.h>
 #include <media/msmb_camera.h>
 
-#define MSM_POST_EVT_TIMEOUT 15000
+#define MSM_POST_EVT_TIMEOUT 5000
 #define MSM_POST_EVT_NOTIMEOUT 0xFFFFFFFF
+#define MSM_CAMERA_STREAM_CNT_BITS  32
 
 struct msm_video_device {
 	struct video_device *vdev;
 	atomic_t opened;
-	atomic_t stream_cnt;
 };
 
 struct msm_queue_head {
@@ -118,7 +117,4 @@ struct vb2_queue *msm_get_stream_vb2q(unsigned int session_id,
 	unsigned int stream_id);
 struct msm_stream *msm_get_stream_from_vb2q(struct vb2_queue *q);
 struct msm_session *msm_session_find(unsigned int session_id);
-struct v4l2_subdev *msm_sd_find(const char *name);
-struct v4l2_subdev *msm_sensor_sd_find(int video_dev_num);
-int msm_sensor_sd_ioctl_call(unsigned int cmd, void* data);
 #endif /*_MSM_H */

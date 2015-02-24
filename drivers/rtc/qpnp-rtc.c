@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-13, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -431,7 +431,7 @@ rtc_alarm_handled:
 	return IRQ_HANDLED;
 }
 
-static int __devinit qpnp_rtc_probe(struct spmi_device *spmi)
+static int qpnp_rtc_probe(struct spmi_device *spmi)
 {
 	int rc;
 	u8 subtype;
@@ -580,7 +580,7 @@ fail_rtc_enable:
 	return rc;
 }
 
-static int __devexit qpnp_rtc_remove(struct spmi_device *spmi)
+static int qpnp_rtc_remove(struct spmi_device *spmi)
 {
 	struct qpnp_rtc *rtc_dd = dev_get_drvdata(&spmi->dev);
 
@@ -598,9 +598,19 @@ static void qpnp_rtc_shutdown(struct spmi_device *spmi)
 	u8 reg;
 	int rc;
 	unsigned long irq_flags;
-	struct qpnp_rtc *rtc_dd = dev_get_drvdata(&spmi->dev);
-	bool rtc_alarm_powerup = rtc_dd->rtc_alarm_powerup;
+	struct qpnp_rtc *rtc_dd;
+	bool rtc_alarm_powerup;
 
+	if (!spmi) {
+		pr_err("qpnp-rtc: spmi device not found\n");
+		return;
+	}
+	rtc_dd = dev_get_drvdata(&spmi->dev);
+	if (!rtc_dd) {
+		pr_err("qpnp-rtc: rtc driver data not found\n");
+		return;
+	}
+	rtc_alarm_powerup = rtc_dd->rtc_alarm_powerup;
 	if (!rtc_alarm_powerup && !poweron_alarm) {
 		spin_lock_irqsave(&rtc_dd->alarm_ctrl_lock, irq_flags);
 		dev_dbg(&spmi->dev, "Disabling alarm interrupts\n");
@@ -636,7 +646,7 @@ static struct of_device_id spmi_match_table[] = {
 
 static struct spmi_driver qpnp_rtc_driver = {
 	.probe          = qpnp_rtc_probe,
-	.remove         = __devexit_p(qpnp_rtc_remove),
+	.remove         = qpnp_rtc_remove,
 	.shutdown       = qpnp_rtc_shutdown,
 	.driver = {
 		.name   = "qcom,qpnp-rtc",

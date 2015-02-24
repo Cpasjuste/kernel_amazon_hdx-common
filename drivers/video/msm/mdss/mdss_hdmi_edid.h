@@ -26,6 +26,7 @@ struct hdmi_edid_init_data {
 
 int hdmi_edid_read(void *edid_ctrl);
 u8 hdmi_edid_get_sink_scaninfo(void *edid_ctrl, u32 resolution);
+bool hdmi_edid_get_video_input_def(void *edid_ctrl);
 u32 hdmi_edid_get_sink_mode(void *edid_ctrl);
 int hdmi_edid_get_audio_blk(void *edid_ctrl,
 	struct msm_hdmi_audio_edid_blk *blk);

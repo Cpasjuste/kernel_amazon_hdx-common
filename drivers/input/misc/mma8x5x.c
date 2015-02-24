@@ -818,7 +818,7 @@ static int mma8x5x_parse_dt(struct device *dev, struct mma8x5x_data *data)
 	return 0;
 }
 
-static int __devinit mma8x5x_probe(struct i2c_client *client,
+static int mma8x5x_probe(struct i2c_client *client,
 				   const struct i2c_device_id *id)
 {
 	int result, chip_id;
@@ -1004,7 +1004,7 @@ err_out:
 err_power_on:
 	return result;
 }
-static int __devexit mma8x5x_remove(struct i2c_client *client)
+static int mma8x5x_remove(struct i2c_client *client)
 {
 	struct mma8x5x_data *pdata = i2c_get_clientdata(client);
 	struct input_polled_dev *poll_dev;
@@ -1089,7 +1089,7 @@ static struct i2c_driver mma8x5x_driver = {
 		.of_match_table = mma8x5x_of_match,
 	},
 	.probe = mma8x5x_probe,
-	.remove = __devexit_p(mma8x5x_remove),
+	.remove = mma8x5x_remove,
 	.id_table = mma8x5x_id,
 	.detect = mma8x5x_detect,
 	.address_list = normal_i2c,

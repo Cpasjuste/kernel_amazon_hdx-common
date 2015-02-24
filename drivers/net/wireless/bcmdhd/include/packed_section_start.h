@@ -15,7 +15,7 @@
  * #include <packed_section_end.h>
  *
  *
- * Copyright (C) 1999-2012, Broadcom Corporation
+ * Copyright (C) 1999-2014, Broadcom Corporation
  * 
  *      Unless you and Broadcom execute a separate written software license
  * agreement governing use of this software, this software is licensed to you
@@ -34,11 +34,14 @@
  *      Notwithstanding the above, under no circumstances may you combine this
  * software in any way with any other Broadcom software provided under a license
  * other than the GPL, without Broadcom's express prior written consent.
- * $Id: packed_section_start.h 286783 2011-09-29 06:18:57Z $
+ * $Id: packed_section_start.h 437241 2013-11-18 07:39:24Z $
  */
 
 
-
+/* Error check - BWL_PACKED_SECTION is defined in packed_section_start.h
+ * and undefined in packed_section_end.h. If it is already defined at this
+ * point, then there is a missing include of packed_section_end.h.
+ */
 #ifdef BWL_PACKED_SECTION
 	#error "BWL_PACKED_SECTION is already defined!"
 #else
@@ -48,7 +51,7 @@
 
 
 
-
+/* Declare compiler-specific directives for structure packing. */
 #if defined(__GNUC__) || defined(__lint)
 	#define	BWL_PRE_PACKED_STRUCT
 	#define	BWL_POST_PACKED_STRUCT	__attribute__ ((packed))

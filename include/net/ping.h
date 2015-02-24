@@ -31,14 +31,15 @@
 
 /* Compatibility glue so we can support IPv6 when it's compiled as a module */
 struct pingv6_ops {
-	int (*ipv6_recv_error)(struct sock *sk, struct msghdr *msg, int len);
-	int (*datagram_recv_ctl)(struct sock *sk, struct msghdr *msg,
-				 struct sk_buff *skb);
+	int (*ipv6_recv_error)(struct sock *sk, struct msghdr *msg, int len,
+			       int *addr_len);
+	int (*ip6_datagram_recv_ctl)(struct sock *sk, struct msghdr *msg,
+				     struct sk_buff *skb);
 	int (*icmpv6_err_convert)(u8 type, u8 code, int *err);
 	void (*ipv6_icmp_error)(struct sock *sk, struct sk_buff *skb, int err,
 				__be16 port, u32 info, u8 *payload);
 	int (*ipv6_chk_addr)(struct net *net, const struct in6_addr *addr,
-			     struct net_device *dev, int strict);
+			     const struct net_device *dev, int strict);
 };
 
 struct ping_table {
@@ -72,7 +73,6 @@ int  ping_init_sock(struct sock *sk);
 void ping_close(struct sock *sk, long timeout);
 int  ping_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 void ping_err(struct sk_buff *skb, int offset, u32 info);
-void ping_v4_err(struct sk_buff *skb, u32 info);
 int  ping_getfrag(void *from, char *to, int offset, int fraglen, int odd,
 		  struct sk_buff *);
 

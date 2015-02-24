@@ -40,7 +40,9 @@ struct tsens_device {
 };
 
 int32_t tsens_get_temp(struct tsens_device *dev, unsigned long *temp);
+#if defined(CONFIG_ARCH_MSM8974_THOR) || defined(CONFIG_ARCH_MSM8974_APOLLO)
 int tsens_get_warm_temp_threshold(struct tsens_device *device, unsigned long *temp);
+#endif
 int msm_tsens_early_init(struct tsens_platform_data *pdata);
 
 #if defined(CONFIG_THERMAL_TSENS8974)
@@ -58,7 +60,7 @@ static inline int tsens_get_hw_id_mapping(
 { return -ENXIO; }
 #endif
 
-#if defined(CONFIG_THERMAL_TSENS8974) || defined(CONFIG_THERMAL_TSENS8960)
+#if defined(CONFIG_THERMAL_TSENS8974)
 int tsens_get_max_sensor_num(uint32_t *tsens_num_sensors);
 #else
 static inline int tsens_get_max_sensor_num(uint32_t *tsens_num_sensors)

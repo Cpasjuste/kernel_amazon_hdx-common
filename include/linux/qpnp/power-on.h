@@ -51,7 +51,6 @@ enum pon_power_off_type {
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 int qpnp_pon_record_normpoff(void);
 int qpnp_pon_record_sw_wd(bool);
-int qpnp_pon_panic_indcator(void);
 #endif
 
 #ifdef CONFIG_QPNP_POWER_ON
@@ -59,6 +58,7 @@ int qpnp_pon_system_pwr_off(enum pon_power_off_type type);
 int qpnp_pon_is_warm_reset(void);
 int qpnp_pon_trigger_config(enum pon_trigger_source pon_src, bool enable);
 int qpnp_pon_wd_config(bool enable);
+void qpnp_pon_charge_mode_enable(void);
 #else
 static int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
 {

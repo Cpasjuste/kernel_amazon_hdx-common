@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -149,7 +149,7 @@ static struct msm_camera_i2c_reg_conf sp1628_recommend_settings[] = {
 	{0x75, 0x18,},
 	{0x77, 0x16,},	/* 18*/
 	{0x7f, 0x19,},
-	{0x31, 0x71,},	/*70 mirror/flip 720P*/
+	{0x31, 0x11,},	/* 720P, no mirror/flip */
 	{0xfd, 0x01,},
 	{0x5d, 0x11,},	/* position*/
 	{0x5f, 0x00,},
@@ -591,7 +591,12 @@ static int32_t sp1628_platform_probe(struct platform_device *pdev)
 	const struct of_device_id *match;
 	CDBG("%s, E.", __func__);
 	match = of_match_device(sp1628_dt_match, &pdev->dev);
-	rc = msm_sensor_platform_probe(pdev, match->data);
+	if (match)
+		rc = msm_sensor_platform_probe(pdev, match->data);
+	else {
+		pr_err("%s:%d match is null\n", __func__, __LINE__);
+		rc = -EINVAL;
+	}
 	return rc;
 }
 
@@ -622,7 +627,7 @@ int32_t sp1628_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 	void __user *argp)
 {
 	struct sensorb_cfg_data *cdata = (struct sensorb_cfg_data *)argp;
-	long rc = 0;
+	int32_t rc = 0;
 	int32_t i = 0;
 	mutex_lock(s_ctrl->msm_sensor_mutex);
 	CDBG("%s:%d %s cfgtype = %d\n", __func__, __LINE__,
@@ -644,6 +649,9 @@ int32_t sp1628_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 		for (i = 0; i < SUB_MODULE_MAX; i++)
 			CDBG("%s:%d subdev_id[%d] %d\n", __func__, __LINE__, i,
 				cdata->cfg.sensor_info.subdev_id[i]);
+		CDBG("%s:%d mount angle valid %d value %d\n", __func__,
+			__LINE__, cdata->cfg.sensor_info.is_mount_angle_valid,
+			cdata->cfg.sensor_info.sensor_mount_angle);
 
 		break;
 	case CFG_SET_INIT_SETTING:
@@ -674,8 +682,12 @@ int32_t sp1628_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 			MSM_CAMERA_I2C_BYTE_DATA);
 		break;
 	case CFG_GET_SENSOR_INIT_PARAMS:
-		cdata->cfg.sensor_init_params =
-			*s_ctrl->sensordata->sensor_init_params;
+		cdata->cfg.sensor_init_params.modes_supported =
+			s_ctrl->sensordata->sensor_info->modes_supported;
+		cdata->cfg.sensor_init_params.position =
+			s_ctrl->sensordata->sensor_info->position;
+		cdata->cfg.sensor_init_params.sensor_mount_angle =
+			s_ctrl->sensordata->sensor_info->sensor_mount_angle;
 		CDBG("%s:%d init params mode %d pos %d mount %d\n", __func__,
 			__LINE__,
 			cdata->cfg.sensor_init_params.modes_supported,
@@ -724,7 +736,6 @@ int32_t sp1628_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 			rc = -EFAULT;
 			break;
 		}
-		s_ctrl->free_power_setting = true;
 		CDBG("%s sensor id %x\n", __func__,
 			sensor_slave_info.slave_addr);
 		CDBG("%s sensor addr type %d\n", __func__,
@@ -866,6 +877,42 @@ int32_t sp1628_sensor_config(struct msm_sensor_ctrl_t *s_ctrl,
 		}
 		break;
 	}
+	case CFG_SET_SATURATION: {
+
+		break;
+	}
+	case CFG_SET_CONTRAST: {
+
+		break;
+	}
+	case CFG_SET_SHARPNESS: {
+
+		break;
+	}
+	case CFG_SET_ISO: {
+
+		break;
+	}
+	case CFG_SET_EXPOSURE_COMPENSATION: {
+
+		break;
+	}
+	case CFG_SET_EFFECT: {
+
+		break;
+	}
+	case CFG_SET_ANTIBANDING: {
+
+		break;
+	}
+	case CFG_SET_BESTSHOT_MODE: {
+
+		break;
+	}
+	case CFG_SET_WHITE_BALANCE: {
+
+		break;
+	}
 	default:
 		rc = -EFAULT;
 		break;
@@ -896,7 +943,7 @@ int32_t sp1628_match_id(struct msm_sensor_ctrl_t *s_ctrl)
 		return rc;
 	}
 
-	CDBG("%s: read id: %x expected id 0x16:\n", __func__, chipid);
+	CDBG("%s: read id: 0x%x expected id 0x16:\n", __func__, chipid);
 	if (chipid != 0x16) {
 		pr_err("msm_sensor_match_id chip id doesnot match\n");
 		return -ENODEV;
@@ -913,7 +960,7 @@ int32_t sp1628_match_id(struct msm_sensor_ctrl_t *s_ctrl)
 		return rc;
 	}
 
-	CDBG("%s: read id: %x expected id 0x28:\n", __func__, chipid);
+	CDBG("%s: read id: 0x%x expected id 0x28:\n", __func__, chipid);
 	if (chipid != 0x28) {
 		pr_err("msm_sensor_match_id chip id doesnot match\n");
 		return -ENODEV;

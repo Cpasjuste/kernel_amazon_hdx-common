@@ -27,6 +27,7 @@
 #include <linux/qpnp/qpnp-adc.h>
 #include <linux/qpnp/power-on.h>
 #include <linux/of_batterydata.h>
+#include <linux/wakelock.h>
 
 /* BMS Register Offsets */
 #define REVISION1			0x0
@@ -128,9 +129,8 @@ struct fcc_sample {
 };
 
 struct bms_irq {
-	unsigned int	irq;
+	int		irq;
 	unsigned long	disabled;
-	bool		ready;
 };
 
 struct bms_wakeup_source {
@@ -394,7 +394,7 @@ static void bms_relax(struct bms_wakeup_source *source)
 
 static void enable_bms_irq(struct bms_irq *irq)
 {
-	if (irq->ready && __test_and_clear_bit(0, &irq->disabled)) {
+	if (__test_and_clear_bit(0, &irq->disabled)) {
 		enable_irq(irq->irq);
 		pr_debug("enabled irq %d\n", irq->irq);
 	}
@@ -402,7 +402,7 @@ static void enable_bms_irq(struct bms_irq *irq)
 
 static void disable_bms_irq(struct bms_irq *irq)
 {
-	if (irq->ready && !__test_and_set_bit(0, &irq->disabled)) {
+	if (!__test_and_set_bit(0, &irq->disabled)) {
 		disable_irq(irq->irq);
 		pr_debug("disabled irq %d\n", irq->irq);
 	}
@@ -410,7 +410,7 @@ static void disable_bms_irq(struct bms_irq *irq)
 
 static void disable_bms_irq_nosync(struct bms_irq *irq)
 {
-	if (irq->ready && !__test_and_set_bit(0, &irq->disabled)) {
+	if (!__test_and_set_bit(0, &irq->disabled)) {
 		disable_irq_nosync(irq->irq);
 		pr_debug("disabled irq %d\n", irq->irq);
 	}
@@ -1774,7 +1774,6 @@ static int report_cc_based_soc(struct qpnp_bms_chip *chip)
 	int soc, soc_change;
 	int time_since_last_change_sec, charge_time_sec = 0;
 	unsigned long last_change_sec;
-	struct timespec now;
 	struct qpnp_vadc_result result;
 	int batt_temp;
 	int rc;
@@ -1889,7 +1888,6 @@ static int report_cc_based_soc(struct qpnp_bms_chip *chip)
 	chip->last_soc = bound_soc(soc);
 	backup_soc_and_iavg(chip, batt_temp, chip->last_soc);
 	pr_debug("Reported SOC = %d\n", chip->last_soc);
-	chip->t_soc_queried = now;
 	mutex_unlock(&chip->last_soc_mutex);
 
 	return soc;
@@ -2176,7 +2174,6 @@ skip_limits:
 	rc_new_uah = (params->fcc_uah * pc_new) / 100;
 	soc_new = (rc_new_uah - params->cc_uah - params->uuc_uah)*100
 					/ (params->fcc_uah - params->uuc_uah);
-	soc_new = bound_soc(soc_new);
 
 	/*
 	 * if soc_new is ZERO force it higher so that phone doesnt report soc=0
@@ -2205,12 +2202,7 @@ static int clamp_soc_based_on_voltage(struct qpnp_bms_chip *chip, int soc)
 		pr_err("adc vbat failed err = %d\n", rc);
 		return soc;
 	}
-
-	/* only clamp when discharging */
-	if (is_battery_charging(chip))
-		return soc;
-
-	if (soc <= 0 && vbat_uv > chip->v_cutoff_uv) {
+	if (soc == 0 && vbat_uv > chip->v_cutoff_uv) {
 		pr_debug("clamping soc to 1, vbat (%d) > cutoff (%d)\n",
 						vbat_uv, chip->v_cutoff_uv);
 		return 1;
@@ -2423,17 +2415,14 @@ static int calculate_state_of_charge(struct qpnp_bms_chip *chip,
 	}
 	mutex_unlock(&chip->soc_invalidation_mutex);
 
-	if (chip->first_time_calc_soc && !chip->shutdown_soc_invalid) {
-		pr_debug("Skip adjustment when shutdown SOC has been forced\n");
-		new_calculated_soc = soc;
-	} else {
-		pr_debug("SOC before adjustment = %d\n", soc);
-		new_calculated_soc = adjust_soc(chip, &params, soc, batt_temp);
-	}
+	pr_debug("SOC before adjustment = %d\n", soc);
+	new_calculated_soc = adjust_soc(chip, &params, soc, batt_temp);
 
 	/* always clamp soc due to BMS hw/sw immaturities */
 	new_calculated_soc = clamp_soc_based_on_voltage(chip,
 					new_calculated_soc);
+
+	new_calculated_soc = bound_soc(new_calculated_soc);
 	/*
 	 * If the battery is full, configure the cc threshold so the system
 	 * wakes up after SoC changes
@@ -3898,7 +3887,6 @@ do {									\
 		pr_err("Unable to request " #irq_name " irq: %d\n", rc);\
 		return -ENXIO;						\
 	}								\
-	chip->irq_name##_irq.ready = true;				\
 } while (0)
 
 static int bms_request_irqs(struct qpnp_bms_chip *chip)
@@ -4105,6 +4093,15 @@ static int read_iadc_channel_select(struct qpnp_bms_chip *chip)
 				return rc;
 			}
 		}
+	} else {
+		rc = qpnp_masked_write_iadc(chip,
+				IADC1_BMS_ADC_INT_RSNSN_CTL,
+				ADC_INT_RSNSN_CTL_MASK, 0x0);
+		if (rc) {
+			pr_err("Unable to set batfet config %x to %x: %d\n",
+				IADC1_BMS_ADC_INT_RSNSN_CTL, 0x0, rc);
+			return rc;
+		}
 	}
 
 	return 0;
@@ -4166,7 +4163,7 @@ static int setup_die_temp_monitoring(struct qpnp_bms_chip *chip)
 	return 0;
 }
 
-static int __devinit qpnp_bms_probe(struct spmi_device *spmi)
+static int qpnp_bms_probe(struct spmi_device *spmi)
 {
 	struct qpnp_bms_chip *chip;
 	bool warm_reset;
@@ -4418,7 +4415,7 @@ static const struct dev_pm_ops qpnp_bms_pm_ops = {
 
 static struct spmi_driver qpnp_bms_driver = {
 	.probe		= qpnp_bms_probe,
-	.remove		= __devexit_p(qpnp_bms_remove),
+	.remove		= qpnp_bms_remove,
 	.driver		= {
 		.name		= QPNP_BMS_DEV_NAME,
 		.owner		= THIS_MODULE,

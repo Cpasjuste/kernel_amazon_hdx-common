@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -23,6 +23,8 @@
 #define CSID_VERSION_V20                      0x02000011
 #define CSID_VERSION_V22                      0x02001000
 #define CSID_VERSION_V30                      0x30000000
+#define CSID_VERSION_V31                      0x30010000
+#define CSID_VERSION_V40                      0x40000000
 #define MSM_CSID_DRV_NAME                    "msm_csid"
 
 #define DBG_CSID 0
@@ -49,10 +51,11 @@ static int msm_csid_cid_lut(
 		return -EINVAL;
 	}
 	for (i = 0; i < csid_lut_params->num_cid && i < 16; i++) {
-		CDBG("%s lut params num_cid = %d, cid = %d, dt = %x, df = %d\n",
+		CDBG("%s lut params num_cid = %d, cid = %d\n",
 			__func__,
 			csid_lut_params->num_cid,
-			csid_lut_params->vc_cfg[i]->cid,
+			csid_lut_params->vc_cfg[i]->cid);
+		CDBG("%s lut params dt = 0x%x, df = %d\n", __func__,
 			csid_lut_params->vc_cfg[i]->dt,
 			csid_lut_params->vc_cfg[i]->decode_format);
 		if (csid_lut_params->vc_cfg[i]->dt < 0x12 ||
@@ -94,7 +97,7 @@ static void msm_csid_set_debug_reg(void __iomem *csidbase,
 static void msm_csid_reset(struct csid_device *csid_dev)
 {
 	msm_camera_io_w(CSID_RST_STB_ALL, csid_dev->base + CSID_RST_CMD_ADDR);
-	wait_for_completion(&csid_dev->reset_complete);
+	wait_for_completion_interruptible(&csid_dev->reset_complete);
 	return;
 }
 
@@ -111,10 +114,11 @@ static int msm_csid_config(struct csid_device *csid_dev,
 		return -EINVAL;
 	}
 
-	CDBG("%s csid_params, lane_cnt = %d, lane_assign = %x, phy sel = %d\n",
+	CDBG("%s csid_params, lane_cnt = %d, lane_assign = 0x%x\n",
 		__func__,
 		csid_params->lane_cnt,
-		csid_params->lane_assign,
+		csid_params->lane_assign);
+	CDBG("%s csid_params phy_sel = %d\n", __func__,
 		csid_params->phy_sel);
 
 	msm_csid_reset(csid_dev);
@@ -143,8 +147,6 @@ static irqreturn_t msm_csid_irq(int irq_num, void *data)
 {
 	uint32_t irq;
 	struct csid_device *csid_dev = data;
-	void __iomem *csidbase;
-	csidbase = csid_dev->base;
 
 	if (!csid_dev) {
 		pr_err("%s:%d csid_dev NULL\n", __func__, __LINE__);
@@ -179,57 +181,9 @@ static int msm_csid_subdev_g_chip_ident(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static struct msm_cam_clk_info csid_8960_clk_info[] = {
-	{"csi_src_clk", 177780000},
-	{"csi_clk", -1},
-	{"csi_phy_clk", -1},
-	{"csi_pclk", -1},
-};
-
-static struct msm_cam_clk_info csid_8974_clk_info[] = {
-	{"camss_top_ahb_clk", -1},
-	{"ispif_ahb_clk", -1},
-	{"csi_ahb_clk", -1},
-	{"csi_src_clk", 200000000},
-	{"csi_clk", -1},
-	{"csi_phy_clk", -1},
-	{"csi_pix_clk", -1},
-	{"csi_rdi_clk", -1},
-};
-
-static struct msm_cam_clk_info csid_8610_clk_info[] = {
-	{"csi_ahb_clk", -1},
-	{"csi_src_clk", 200000000},
-	{"csi_clk", -1},
-	{"csi0phy_mux_clk", -1},
-	{"csi1phy_mux_clk", -1},
-	{"csi0pix_mux_clk", -1},
-	{"csi0rdi_mux_clk", -1},
-	{"csi1rdi_mux_clk", -1},
-	{"csi2rdi_mux_clk", -1},
-};
-
-static struct msm_cam_clk_info csid_8610_clk_src_info[] = {
-	{"csi_phy_src_clk", 0},
-	{"csi_phy_src_clk", 0},
-	{"csi_pix_src_clk", 0},
-	{"csi_rdi_src_clk", 0},
-	{"csi_rdi_src_clk", 0},
-	{"csi_rdi_src_clk", 0},
-};
-
-static struct camera_vreg_t csid_8960_vreg_info[] = {
-	{"mipi_csi_vdd", REG_LDO, 1200000, 1200000, 20000},
-};
-
-static struct camera_vreg_t csid_vreg_info[] = {
-	{"qcom,mipi-csi-vdd", REG_LDO, 0, 0, 12000},
-};
-
 static int msm_csid_init(struct csid_device *csid_dev, uint32_t *csid_version)
 {
 	int rc = 0;
-	struct camera_vreg_t *cam_vreg;
 
 	if (!csid_version) {
 		pr_err("%s:%d csid_version NULL\n", __func__, __LINE__);
@@ -252,78 +206,41 @@ static int msm_csid_init(struct csid_device *csid_dev, uint32_t *csid_version)
 		return rc;
 	}
 
-	if (CSID_VERSION == CSID_VERSION_V20)
-		cam_vreg = csid_8960_vreg_info;
-	else
-		cam_vreg = csid_vreg_info;
-
-	if (CSID_VERSION < CSID_VERSION_V30) {
-		rc = msm_camera_config_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 1);
-		if (rc < 0) {
-			pr_err("%s: regulator on failed\n", __func__);
-			goto vreg_config_failed;
-		}
-		rc = msm_camera_enable_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 1);
-		if (rc < 0) {
-			pr_err("%s: regulator enable failed\n", __func__);
-			goto vreg_enable_failed;
-		}
-
-		if (CSID_VERSION == CSID_VERSION_V20) {
-			rc = msm_cam_clk_enable(&csid_dev->pdev->dev,
-				csid_8960_clk_info, csid_dev->csid_clk,
-				ARRAY_SIZE(csid_8960_clk_info), 1);
-			if (rc < 0) {
-				pr_err("%s: 8960: clock enable failed\n",
-					 __func__);
-				goto clk_enable_failed;
-			}
-		} else {
-			msm_cam_clk_sel_src(&csid_dev->pdev->dev,
-				&csid_8610_clk_info[3], csid_8610_clk_src_info,
-				ARRAY_SIZE(csid_8610_clk_src_info));
-			rc = msm_cam_clk_enable(&csid_dev->pdev->dev,
-				csid_8610_clk_info, csid_dev->csid_clk,
-				ARRAY_SIZE(csid_8610_clk_info), 1);
-			if (rc < 0) {
-				pr_err("%s: 8610: clock enable failed\n",
-					 __func__);
-				goto clk_enable_failed;
-			}
-		}
-	} else if (CSID_VERSION >= CSID_VERSION_V30) {
-		rc = msm_camera_config_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 1);
-		if (rc < 0) {
-			pr_err("%s: regulator on failed\n", __func__);
-			goto vreg_config_failed;
-		}
-
-		rc = msm_camera_enable_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 1);
-		if (rc < 0) {
-			pr_err("%s: regulator enable failed\n", __func__);
-			goto vreg_enable_failed;
-		}
-
-		rc = msm_cam_clk_enable(&csid_dev->pdev->dev,
-			csid_8974_clk_info, csid_dev->csid_clk,
-			ARRAY_SIZE(csid_8974_clk_info), 1);
-		if (rc < 0) {
-			pr_err("%s: clock enable failed\n", __func__);
-			goto clk_enable_failed;
-		}
+	pr_info("%s: CSID_VERSION = 0x%x\n", __func__, CSID_VERSION);
+	/* power up */
+	rc = msm_camera_config_vreg(&csid_dev->pdev->dev,
+		csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
+		NULL, 0, &csid_dev->csi_vdd, 1);
+	if (rc < 0) {
+		pr_err("%s: regulator on failed\n", __func__);
+		goto vreg_config_failed;
 	}
-		CDBG("%s:%d called\n", __func__, __LINE__);
-	csid_dev->hw_version =
-		msm_camera_io_r(csid_dev->base + CSID_HW_VERSION_ADDR);
-	CDBG("%s:%d called csid_dev->hw_version %x\n", __func__, __LINE__,
+	rc = msm_camera_enable_vreg(&csid_dev->pdev->dev,
+		csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
+		NULL, 0, &csid_dev->csi_vdd, 1);
+	if (rc < 0) {
+		pr_err("%s: regulator enable failed\n", __func__);
+		goto vreg_enable_failed;
+	}
+
+	if (CSID_VERSION == CSID_VERSION_V22) {
+		msm_cam_clk_sel_src(&csid_dev->pdev->dev,
+			&csid_clk_info[3], csid_clk_src_info,
+			ARRAY_SIZE(csid_clk_src_info));
+	}
+
+	rc = msm_cam_clk_enable(&csid_dev->pdev->dev,
+			csid_clk_info, csid_dev->csid_clk,
+			ARRAY_SIZE(csid_clk_info), 1);
+	if (rc < 0) {
+		pr_err("%s:%d clock enable failed\n",
+			 __func__, __LINE__);
+		goto clk_enable_failed;
+	}
+	CDBG("%s:%d called\n", __func__, __LINE__);
+		csid_dev->hw_version =
+	msm_camera_io_r(csid_dev->base + CSID_HW_VERSION_ADDR);
+	CDBG("%s:%d called csid_dev->hw_version 0x%x\n", __func__, __LINE__,
 		csid_dev->hw_version);
 	*csid_version = csid_dev->hw_version;
 
@@ -336,25 +253,13 @@ static int msm_csid_init(struct csid_device *csid_dev, uint32_t *csid_version)
 	return rc;
 
 clk_enable_failed:
-	if (CSID_VERSION < CSID_VERSION_V30) {
 		msm_camera_enable_vreg(&csid_dev->pdev->dev,
 			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
 			NULL, 0, &csid_dev->csi_vdd, 0);
-	} else if (CSID_VERSION >= CSID_VERSION_V30) {
-		msm_camera_enable_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 0);
-	}
 vreg_enable_failed:
-	if (CSID_VERSION < CSID_VERSION_V30) {
 		msm_camera_config_vreg(&csid_dev->pdev->dev,
 			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
 			NULL, 0, &csid_dev->csi_vdd, 0);
-	} else if (CSID_VERSION >= CSID_VERSION_V30) {
-		msm_camera_config_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 0);
-	}
 vreg_config_failed:
 	iounmap(csid_dev->base);
 	csid_dev->base = NULL;
@@ -371,48 +276,25 @@ static int msm_csid_release(struct csid_device *csid_dev)
 		return -EINVAL;
 	}
 
+	CDBG("%s:%d, hw_version = 0x%x\n", __func__, __LINE__,
+		csid_dev->hw_version);
+
 	irq = msm_camera_io_r(csid_dev->base + CSID_IRQ_STATUS_ADDR);
 	msm_camera_io_w(irq, csid_dev->base + CSID_IRQ_CLEAR_CMD_ADDR);
 	msm_camera_io_w(0, csid_dev->base + CSID_IRQ_MASK_ADDR);
 
 	disable_irq(csid_dev->irq->start);
 
-	if (csid_dev->hw_version == CSID_VERSION_V20) {
-		msm_cam_clk_enable(&csid_dev->pdev->dev, csid_8960_clk_info,
-			csid_dev->csid_clk, ARRAY_SIZE(csid_8960_clk_info), 0);
+	msm_cam_clk_enable(&csid_dev->pdev->dev, csid_clk_info,
+		csid_dev->csid_clk, ARRAY_SIZE(csid_clk_info), 0);
 
-		msm_camera_enable_vreg(&csid_dev->pdev->dev,
-			csid_8960_vreg_info, ARRAY_SIZE(csid_8960_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 0);
+	msm_camera_enable_vreg(&csid_dev->pdev->dev,
+		csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
+		NULL, 0, &csid_dev->csi_vdd, 0);
 
-		msm_camera_config_vreg(&csid_dev->pdev->dev,
-			csid_8960_vreg_info, ARRAY_SIZE(csid_8960_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 0);
-	} else if (csid_dev->hw_version == CSID_VERSION_V22) {
-		msm_cam_clk_enable(&csid_dev->pdev->dev,
-			csid_8610_clk_info,
-			csid_dev->csid_clk,
-			ARRAY_SIZE(csid_8610_clk_info), 0);
-
-		msm_camera_enable_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 0);
-
-		msm_camera_config_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 0);
-	} else if (csid_dev->hw_version >= CSID_VERSION_V30) {
-		msm_cam_clk_enable(&csid_dev->pdev->dev, csid_8974_clk_info,
-			csid_dev->csid_clk, ARRAY_SIZE(csid_8974_clk_info), 0);
-
-		msm_camera_enable_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 0);
-
-		msm_camera_config_vreg(&csid_dev->pdev->dev,
-			csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
-			NULL, 0, &csid_dev->csi_vdd, 0);
-	}
+	msm_camera_config_vreg(&csid_dev->pdev->dev,
+		csid_vreg_info, ARRAY_SIZE(csid_vreg_info),
+		NULL, 0, &csid_dev->csi_vdd, 0);
 
 	iounmap(csid_dev->base);
 	csid_dev->base = NULL;
@@ -420,7 +302,7 @@ static int msm_csid_release(struct csid_device *csid_dev)
 	return 0;
 }
 
-static long msm_csid_cmd(struct csid_device *csid_dev, void *arg)
+static int32_t msm_csid_cmd(struct csid_device *csid_dev, void *arg)
 {
 	int rc = 0;
 	struct csid_cfg_data *cdata = (struct csid_cfg_data *)arg;
@@ -434,7 +316,7 @@ static long msm_csid_cmd(struct csid_device *csid_dev, void *arg)
 	switch (cdata->cfgtype) {
 	case CSID_INIT:
 		rc = msm_csid_init(csid_dev, &cdata->cfg.csid_version);
-		CDBG("%s csid version %x\n", __func__,
+		CDBG("%s csid version 0x%x\n", __func__,
 			cdata->cfg.csid_version);
 		break;
 	case CSID_CFG: {
@@ -526,7 +408,7 @@ static long msm_csid_subdev_ioctl(struct v4l2_subdev *sd,
 		rc = msm_csid_release(csid_dev);
 		break;
 	default:
-		pr_err("%s: command not found\n", __func__);
+		pr_err_ratelimited("%s: command not found\n", __func__);
 	}
 	CDBG("%s:%d\n", __func__, __LINE__);
 	mutex_unlock(&csid_dev->mutex);
@@ -545,7 +427,7 @@ static const struct v4l2_subdev_ops msm_csid_subdev_ops = {
 	.core = &msm_csid_subdev_core_ops,
 };
 
-static int __devinit csid_probe(struct platform_device *pdev)
+static int csid_probe(struct platform_device *pdev)
 {
 	struct csid_device *new_csid_dev;
 	uint32_t csi_vdd_voltage = 0;

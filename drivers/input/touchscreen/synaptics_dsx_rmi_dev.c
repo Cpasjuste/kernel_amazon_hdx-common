@@ -614,7 +614,6 @@ static int rmidev_init_device(struct synaptics_rmi4_data *rmi4_data)
 		goto err_char_device;
 	}
 
-#if 0
 	retval = gpio_export(rmi4_data->board->irq_gpio, false);
 	if (retval < 0) {
 		dev_err(&rmi4_data->i2c_client->dev,
@@ -633,7 +632,6 @@ static int rmidev_init_device(struct synaptics_rmi4_data *rmi4_data)
 					__func__, rmi4_data->board->irq_gpio);
 		}
 	}
-#endif
 
 	rmidev->sysfs_dir = kobject_create_and_add("rmidev",
 			&rmi4_data->input_dev->dev.kobj);

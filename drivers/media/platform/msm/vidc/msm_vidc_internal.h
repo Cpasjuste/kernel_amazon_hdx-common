@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -23,6 +23,7 @@
 #include <mach/msm_bus.h>
 #include <mach/msm_bus_board.h>
 #include <mach/ocmem.h>
+#include <linux/workqueue.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
@@ -46,8 +47,6 @@
 #define MAX_SUPPORTED_WIDTH 3820
 #define MAX_SUPPORTED_HEIGHT 2160
 
-
-
 #define V4L2_EVENT_VIDC_BASE  10
 
 #define SYS_MSG_START VIDC_EVENT_CHANGE
@@ -60,6 +59,40 @@
 #define MAX_NAME_LENGTH 64
 
 #define EXTRADATA_IDX(__num_planes) (__num_planes - 1)
+
+#define NUM_MBS_PER_SEC(__height, __width, __fps) ({\
+	(__height / 16) * (__width  / 16) * __fps; \
+})
+
+#define NUM_MBS_PER_FRAME(__height, __width) ({\
+	((__height + 15) >> 4) * ((__width + 15) >> 4); \
+})
+
+/* Default threshold to reduce the core frequency */
+#define DCVS_NOMINAL_THRESHOLD 8
+/* Default threshold to increase the core frequency */
+#define DCVS_TURBO_THRESHOLD 4
+/* Instance max load above which DCVS kicks in */
+#define DCVS_NOMINAL_LOAD NUM_MBS_PER_SEC(1088, 1920, 60)
+/* Considering one output buffer with core */
+#define DCVS_BUFFER_WITH_DEC 1
+/* Considering one safeguard buffer */
+#define DCVS_BUFFER_SAFEGUARD 1
+/* Considering one output buffer in transition after decode */
+#define DCVS_BUFFER_RELEASED_DEC 1
+/* Considering atleast one FTB between each FBD */
+#define DCVS_MIN_DRAIN_RATE 1
+/* Ensures difference of 4 between min and max threshold always*/
+#define DCVS_MIN_THRESHOLD_DIFF 4
+/* Maintains the number of FTB's between each FBD over a window */
+#define DCVS_FTB_WINDOW 16
+/* Empirical number arrived at to calculate the high threshold*/
+#define DCVS_EMP_THRESHOLD_HIGH 8
+/* Supported DCVS MBs per frame */
+#define DCVS_MIN_SUPPORTED_MBPERFRAME NUM_MBS_PER_FRAME(2160, 3840)
+/* Window size used to calculate the low threshold */
+#define DCVS_FTB_STAT_SAMPLES 4
+
 enum vidc_ports {
 	OUTPUT_PORT,
 	CAPTURE_PORT,
@@ -164,6 +197,24 @@ struct buf_count {
 	int ebd;
 };
 
+struct dcvs_stats {
+	int num_ftb[DCVS_FTB_WINDOW];
+	int ftb_index;
+	int ftb_counter;
+	int prev_ftb_count;
+	bool prev_freq_lowered;
+	bool prev_freq_increased;
+	bool change_initial_freq;
+	int threshold_disp_buf_high;
+	int threshold_disp_buf_low;
+	int load;
+	int load_low;
+	int load_high;
+	int min_threshold;
+	int max_threshold;
+	bool is_clock_scaled;
+};
+
 struct profile_data {
 	int start;
 	int stop;
@@ -191,13 +242,16 @@ struct msm_vidc_core_capability {
 	u32 pixelprocess_capabilities;
 	struct hal_capability_supported scale_x;
 	struct hal_capability_supported scale_y;
+	struct hal_capability_supported hier_p;
+	struct hal_capability_supported mbs_per_frame;
+	struct hal_capability_supported ltr_count;
 	u32 capability_set;
 	enum buffer_mode_type buffer_mode[MAX_PORT_NUM];
 };
 
 struct msm_vidc_core {
 	struct list_head list;
-	struct mutex sync_lock, lock;
+	struct mutex lock;
 	int id;
 	void *device;
 	struct msm_video_device vdev[MSM_VIDC_MAX_DEVICES];
@@ -210,6 +264,7 @@ struct msm_vidc_core {
 	struct msm_vidc_platform_resources resources;
 	u32 enc_codec_supported;
 	u32 dec_codec_supported;
+	struct delayed_work fw_unload_work;
 };
 
 struct msm_vidc_inst {
@@ -226,6 +281,7 @@ struct msm_vidc_inst {
 	struct list_head internalbufs;
 	struct list_head persistbufs;
 	struct list_head outputbufs;
+	struct list_head pending_getpropq;
 	struct buffer_requirements buff_req;
 	void *mem_client;
 	struct v4l2_ctrl_handler ctrl_handler;
@@ -243,13 +299,15 @@ struct msm_vidc_inst {
 	void *priv;
 	struct msm_vidc_debug debug;
 	struct buf_count count;
+	struct dcvs_stats dcvs;
 	enum msm_vidc_modes flags;
-	u32 multi_stream_mode;
 	struct msm_vidc_core_capability capability;
 	enum buffer_mode_type buffer_mode_set[MAX_PORT_NUM];
 	struct list_head registered_bufs;
 	bool map_output_buffer;
+	atomic_t get_seq_hdr_cnt;
 	struct v4l2_ctrl **ctrls;
+	bool dcvs_mode;
 };
 
 extern struct msm_vidc_drv *vidc_driver;
@@ -268,6 +326,7 @@ struct msm_vidc_ctrl {
 	s32 default_value;
 	u32 step;
 	u32 menu_skip_mask;
+	u32 flags;
 	const char * const *qmenu;
 };
 
@@ -275,6 +334,7 @@ void handle_cmd_response(enum command_response cmd, void *data);
 int msm_vidc_trigger_ssr(struct msm_vidc_core *core,
 	enum hal_ssr_trigger_type type);
 int msm_vidc_check_session_supported(struct msm_vidc_inst *inst);
+int msm_vidc_check_scaling_supported(struct msm_vidc_inst *inst);
 void msm_vidc_queue_v4l2_event(struct msm_vidc_inst *inst, int event_type);
 
 struct buffer_info {
@@ -308,4 +368,18 @@ int qbuf_dynamic_buf(struct msm_vidc_inst *inst,
 			struct buffer_info *binfo);
 int unmap_and_deregister_buf(struct msm_vidc_inst *inst,
 			struct buffer_info *binfo);
+
+void *msm_smem_new_client(enum smem_type mtype,
+				void *platform_resources);
+struct msm_smem *msm_smem_alloc(void *clt, size_t size, u32 align, u32 flags,
+		enum hal_buffer buffer_type, int map_kernel);
+void msm_smem_free(void *clt, struct msm_smem *mem);
+void msm_smem_delete_client(void *clt);
+int msm_smem_cache_operations(void *clt, struct msm_smem *mem,
+		enum smem_cache_ops);
+struct msm_smem *msm_smem_user_to_kernel(void *clt, int fd, u32 offset,
+				enum hal_buffer buffer_type);
+int msm_smem_get_domain_partition(void *clt, u32 flags, enum hal_buffer
+		buffer_type, int *domain_num, int *partition_num);
+void msm_vidc_fw_unload_handler(struct work_struct *work);
 #endif

@@ -28,21 +28,27 @@ typedef enum {
 	ANDROID_LOG_FATAL,
 	ANDROID_LOG_SILENT,
 } android_LogPriority;
+
+typedef enum {
+	VITALS_NORMAL = 0,
+	VITALS_FGTRACKING,
+	VITALS_TIME_BUCKET,
+} vitals_type;
 #endif
 #ifdef CONFIG_AMAZON_METRICS_LOG
 void log_to_metrics(android_LogPriority priority, const char *domain, const char *logmsg);
 void log_counter_to_vitals(android_LogPriority priority,
 	const char *domain, const char *program,
 	const char *source, const char *key,
-	long counter_value, const char *unit, bool fgtracking);
+	long counter_value, const char *unit, vitals_type type);
 void log_timer_to_vitals(android_LogPriority priority,
 	const char *domain, const char *program,
 	const char *source, const char *key,
-	long timer_value, const char *unit, bool fgtracking);
+	long timer_value, const char *unit, vitals_type type);
 #endif
 #ifdef CONFIG_AMAZON_LOG
 void log_to_amzmain(android_LogPriority priority,
-               const char *domain, const char *logmsg);
+		const char *domain, const char *logmsg);
 #endif
 
 #endif /* _LINUX_METRICSLOG_H */

@@ -21,6 +21,10 @@
 #include <linux/notifier.h>
 
 #include "mdss_panel.h"
+#include "mdss_mdp_splash_logo.h"
+
+#define MDSS_LPAE_CHECK(phys)	\
+	((sizeof(phys) > sizeof(unsigned long)) ? ((phys >> 32) & 0xFF) : (0))
 
 #define MSM_FB_DEFAULT_PAGE_SIZE 2
 #define MFD_KEY  0x11161126
@@ -65,6 +69,7 @@ enum mdp_notify_event {
 	MDP_NOTIFY_FRAME_FLUSHED,
 	MDP_NOTIFY_FRAME_DONE,
 	MDP_NOTIFY_FRAME_TIMEOUT,
+	MDP_NOTIFY_FRAME_START,
 };
 
 struct disp_info_type_suspend {
@@ -111,9 +116,11 @@ struct msm_mdp_interface {
 	int (*on_fnc)(struct msm_fb_data_type *mfd);
 	int (*off_fnc)(struct msm_fb_data_type *mfd);
 	/* called to release resources associated to the process */
-	int (*release_fnc)(struct msm_fb_data_type *mfd, bool release_all);
+	int (*release_fnc)(struct msm_fb_data_type *mfd, bool release_all,
+				uint32_t pid);
 	int (*kickoff_fnc)(struct msm_fb_data_type *mfd,
 					struct mdp_display_commit *data);
+	int (*precommit_fnc)(struct msm_fb_data_type *mfd);
 	int (*ioctl_handler)(struct msm_fb_data_type *mfd, u32 cmd, void *arg);
 	void (*dma_fnc)(struct msm_fb_data_type *mfd);
 	int (*cursor_update)(struct msm_fb_data_type *mfd,
@@ -122,11 +129,13 @@ struct msm_mdp_interface {
 	int (*do_histogram)(struct msm_fb_data_type *mfd,
 				struct mdp_histogram *hist);
 	int (*update_ad_input)(struct msm_fb_data_type *mfd);
+	int (*ad_attenuate_bl)(u32 bl, u32 *bl_out,
+			struct msm_fb_data_type *mfd);
 	int (*panel_register_done)(struct mdss_panel_data *pdata);
 	u32 (*fb_stride)(u32 fb_index, u32 xres, int bpp);
+	int (*splash_init_fnc)(struct msm_fb_data_type *mfd);
 	struct msm_sync_pt_data *(*get_sync_fnc)(struct msm_fb_data_type *mfd,
 				const struct mdp_buf_sync *buf_sync);
-	void (*check_dsi_status)(struct work_struct *work, uint32_t interval);
 	void *private1;
 };
 
@@ -136,9 +145,15 @@ struct msm_mdp_interface {
 					/ (2 * max_bright);\
 					} while (0)
 
+struct mdss_fb_file_info {
+	struct file *file;
+	struct list_head list;
+};
+
 struct mdss_fb_proc_info {
 	int pid;
 	u32 ref_cnt;
+	struct list_head file_list;
 	struct list_head list;
 };
 
@@ -174,23 +189,22 @@ struct msm_fb_data_type {
 	struct disp_info_type_suspend suspend;
 
 	struct ion_handle *ihdl;
-	unsigned long iova;
+	dma_addr_t iova;
 	void *cursor_buf;
-	unsigned long cursor_buf_phys;
-	unsigned long cursor_buf_iova;
+	phys_addr_t cursor_buf_phys;
+	dma_addr_t cursor_buf_iova;
 
 	int ext_ad_ctrl;
 	u32 ext_bl_ctrl;
 	u32 calib_mode;
 	u32 bl_level;
-	u32 curr_bl_lvl;
 	u32 bl_scale;
 	u32 bl_min_lvl;
 	u32 unset_bl_level;
 	u32 bl_updated;
-	u32 bl_level_old;
+	u32 bl_level_scaled;
+	u32 bl_level_prev_scaled;
 	struct mutex bl_lock;
-	struct mutex lock;
 
 	struct platform_device *pdev;
 
@@ -213,12 +227,22 @@ struct msm_fb_data_type {
 	wait_queue_head_t kickoff_wait_q;
 	bool shutdown_pending;
 
+	struct msm_fb_splash_info splash_info;
+
+	wait_queue_head_t ioctl_q;
+	atomic_t ioctl_ref_cnt;
+
 	struct msm_fb_backup_type msm_fb_backup;
 	struct completion power_set_comp;
 	u32 is_power_setting;
 
 	u32 dcm_state;
 	struct list_head proc_list;
+	struct ion_client *fb_ion_client;
+	struct ion_handle *fb_ion_handle;
+
+	bool mdss_fb_split_stored;
+
 	u32 wait_for_kickoff;
 };
 
@@ -241,13 +265,18 @@ static inline void mdss_fb_update_notify_update(struct msm_fb_data_type *mfd)
 	}
 }
 
-int mdss_fb_get_phys_info(unsigned long *start, unsigned long *len, int fb_num);
+int mdss_fb_get_phys_info(dma_addr_t *start, unsigned long *len, int fb_num);
 void mdss_fb_set_backlight(struct msm_fb_data_type *mfd, u32 bkl_lvl);
 void mdss_fb_update_backlight(struct msm_fb_data_type *mfd);
-void mdss_fb_wait_for_fence(struct msm_sync_pt_data *sync_pt_data);
+int mdss_fb_wait_for_fence(struct msm_sync_pt_data *sync_pt_data);
 void mdss_fb_signal_timeline(struct msm_sync_pt_data *sync_pt_data);
 struct sync_fence *mdss_fb_sync_get_fence(struct sw_sync_timeline *timeline,
 				const char *fence_name, int val);
 int mdss_fb_register_mdp_instance(struct msm_mdp_interface *mdp);
 int mdss_fb_dcm(struct msm_fb_data_type *mfd, int req_state);
+int mdss_fb_suspres_panel(struct device *dev, void *data);
+int mdss_fb_do_ioctl(struct fb_info *info, unsigned int cmd,
+		     unsigned long arg);
+int mdss_fb_compat_ioctl(struct fb_info *info, unsigned int cmd,
+			 unsigned long arg);
 #endif /* MDSS_FB_H */

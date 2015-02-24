@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,6 +20,15 @@
 #include <linux/interrupt.h>
 #include <media/v4l2-subdev.h>
 #include "msm_sd.h"
+
+/* hw version info:
+  31:28  Major version
+  27:16  Minor version
+  15:0   Revision bits
+**/
+#define CPP_HW_VERSION_1_1_0  0x10010000
+#define CPP_HW_VERSION_1_1_1  0x10010001
+#define CPP_HW_VERSION_2_0_0  0x20000000
 
 #define MAX_ACTIVE_CPP_INSTANCE 8
 #define MAX_CPP_PROCESSING_FRAME 2
@@ -86,6 +95,11 @@ enum cpp_state {
 	CPP_STATE_OFF,
 };
 
+enum cpp_iommu_state {
+	CPP_IOMMU_STATE_DETACHED,
+	CPP_IOMMU_STATE_ATTACHED,
+};
+
 enum msm_queue {
 	MSM_CAM_Q_CTRL,     /* control command or control command status */
 	MSM_CAM_Q_VFE_EVT,  /* adsp event */
@@ -129,7 +143,7 @@ struct msm_cpp_tasklet_queue_cmd {
 
 struct msm_cpp_buffer_map_info_t {
 	unsigned long len;
-	unsigned long phy_addr;
+	dma_addr_t phy_addr;
 	struct ion_handle *ion_handle;
 	struct msm_cpp_buffer_info_t buff_info;
 };
@@ -152,6 +166,12 @@ struct msm_cpp_work_t {
 	struct cpp_device *cpp_dev;
 };
 
+struct msm_cpp_clock_settings_t {
+	unsigned long clock_rate;
+	uint64_t avg;
+	uint64_t inst;
+};
+
 struct cpp_device {
 	struct platform_device *pdev;
 	struct msm_sd_subdev msm_sd;
@@ -169,16 +189,20 @@ struct cpp_device {
 	struct regulator *fs_cpp;
 	struct mutex mutex;
 	enum cpp_state state;
+	enum cpp_iommu_state iommu_state;
 	uint8_t is_firmware_loaded;
 	char *fw_name_bin;
 	struct workqueue_struct *timer_wq;
 	struct msm_cpp_work_t *work;
+	uint32_t fw_version;
+	uint8_t stream_cnt;
 
 	int domain_num;
 	struct iommu_domain *domain;
 	struct device *iommu_ctx;
 	struct ion_client *client;
 	struct kref refcount;
+	uint32_t num_clk;
 
 	/* Reusing proven tasklet from msm isp */
 	atomic_t irq_cnt;

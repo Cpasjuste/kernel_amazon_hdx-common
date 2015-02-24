@@ -668,7 +668,7 @@ static enum flash_area fwu_go_nogo(void)
 		goto exit;
 	}
 	else if (fwu->config_data[1] < devConfigID[1]) {
- 		dev_info(&i2c_client->dev, "[img config]\tNo need to do fw update\n");
+		dev_info(&i2c_client->dev, "[img config]\tNo need to do fw update\n");
 		flash_area = NONE;
 		goto exit;
 	}
@@ -681,7 +681,7 @@ static enum flash_area fwu_go_nogo(void)
 			 __func__,
 			 ((devConfigID[2] << 8) + devConfigID[3]),
 			((fwu->config_data[2] << 8) + fwu->config_data[3]));
-		//img build number is largger than device build number 
+		//img build number is largger than device build number
 		flash_area = CONFIG_AREA;
 		goto exit;
 	}

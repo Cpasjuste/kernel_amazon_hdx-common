@@ -6,8 +6,6 @@
  *
  *  Copyright (c) 2009-2010 Atheros Communications Inc.
  *  Copyright (c) 2012-2014 The Linux Foundation. All rights reserved.
- *  Linux Foundation chooses to take subject only to the GPLv2 license terms,
- *  and distributes only under these terms.
  *
  *  Acknowledgements:
  *  This file is based on hci_h4.c, which was written
@@ -42,22 +40,14 @@
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
 #include <linux/proc_fs.h>
+
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
 #include "hci_uart.h"
 #ifdef CONFIG_SERIAL_MSM_HS
-#include <mach/msm_serial_hs.h>
+#include <linux/platform_data/msm_serial_hs.h>
 #endif
-
-#include "linux/if.h"
-#include "linux/socket.h"
-#include "linux/netlink.h"
-#define NETLINK_ATHBT_EVENT       (NETLINK_GENERIC + 14)
-static struct sock *athbt_nl_sock;
-static u32 gpid;
-
-void athbt_netlink_send(char *event_data, u32 event_datalen);
 
 static int enableuartsleep = 1;
 module_param(enableuartsleep, int, 0644);
@@ -125,7 +115,7 @@ struct ath_struct {
 
 static void hsuart_serial_clock_on(struct uart_port *port)
 {
-	BT_INFO("hsuart_serial_clock_on");
+	BT_DBG("");
 	if (port)
 		msm_hs_request_clock_on(port);
 	else
@@ -134,7 +124,7 @@ static void hsuart_serial_clock_on(struct uart_port *port)
 
 static void hsuart_serial_clock_off(struct uart_port *port)
 {
-	BT_INFO("hsuart_serial_clock_off");
+	BT_DBG("");
 	if (port)
 		msm_hs_request_clock_off(port);
 	else
@@ -155,7 +145,7 @@ static int ath_wakeup_ar3k(void)
 	int status = 0;
 	if (test_bit(BT_TXEXPIRED, &flags)) {
 		hsuart_serial_clock_on(bsi->uport);
-		BT_INFO("wakeup device\n");
+		BT_DBG("wakeup device\n");
 		gpio_set_value(bsi->ext_wake, 0);
 		msleep(20);
 		gpio_set_value(bsi->ext_wake, 1);
@@ -168,12 +158,11 @@ static int ath_wakeup_ar3k(void)
 static void wakeup_host_work(struct work_struct *work)
 {
 
-	BT_INFO("wake up host");
+	BT_DBG("wake up host");
 	if (test_bit(BT_SLEEPENABLE, &flags)) {
 		if (test_bit(BT_TXEXPIRED, &flags))
 			hsuart_serial_clock_on(bsi->uport);
 	}
-	athbt_netlink_send("hostwakeup", 10);
 	if (!is_lpm_enabled)
 		modify_timer_task();
 }
@@ -214,7 +203,6 @@ static int ath_bluesleep_gpio_config(int on)
 	if (!on) {
 		if (disable_irq_wake(bsi->host_wake_irq))
 			BT_ERR("Couldn't disable hostwake IRQ wakeup mode\n");
-		athbt_netlink_send("hostisdown", 10);
 		goto free_host_wake_irq;
 	}
 
@@ -648,55 +636,7 @@ static int bluesleep_populate_pinfo(struct platform_device *pdev)
 	return 0;
 }
 
-void athbt_netlink_send(char *event_data, u32 event_datalen)
-{
-	struct sk_buff *skb = NULL;
-	struct nlmsghdr *nlh;
-
-	skb = nlmsg_new(NLMSG_SPACE(event_datalen), GFP_ATOMIC);
-	if (!skb) {
-		BT_ERR("%s: No memory,\n", __func__);
-		return;
-	}
-
-	nlh = nlmsg_put(skb, gpid, 0, 0 , NLMSG_SPACE(event_datalen), 0);
-	if (!nlh) {
-		BT_ERR("%s: nlmsg_put() failed\n", __func__);
-		return;
-	}
-
-	memcpy(NLMSG_DATA(nlh), event_data, event_datalen);
-
-	NETLINK_CB(skb).pid = 0;        /* from kernel */
-	NETLINK_CB(skb).dst_group = 0;  /* unicast */
-	if (athbt_nl_sock != NULL)
-		netlink_unicast(athbt_nl_sock, skb, gpid, MSG_DONTWAIT);
-}
-
-static void athbt_netlink_receive(struct sk_buff *__skb)
-{
-	struct sk_buff *skb = NULL;
-	struct nlmsghdr *nlh = NULL;
-	u_int8_t *data = NULL;
-	u_int32_t uid, pid, seq;
-
-	skb = skb_get(__skb);
-	if (skb) {
-		/* process netlink message pointed by skb->data */
-		nlh = (struct nlmsghdr *)skb->data;
-		pid = NETLINK_CREDS(skb)->pid;
-		pid = nlh->nlmsg_pid;
-		uid = NETLINK_CREDS(skb)->uid;
-		seq = nlh->nlmsg_seq;
-		data = NLMSG_DATA(nlh);
-		BT_DBG("%s, %s\n", __func__, (char *)NLMSG_DATA(nlh));
-		gpid = pid;
-		kfree_skb(skb);
-	}
-	return;
-}
-
-static int __devinit bluesleep_probe(struct platform_device *pdev)
+static int bluesleep_probe(struct platform_device *pdev)
 {
 	int ret;
 
@@ -734,16 +674,6 @@ static int __devinit bluesleep_probe(struct platform_device *pdev)
 
 	bsi->irq_polarity = POLARITY_LOW;	/* low edge (falling edge) */
 
-	athbt_nl_sock = (struct sock *)netlink_kernel_create(
-		&init_net, NETLINK_ATHBT_EVENT,
-		1, &athbt_netlink_receive, NULL,
-		THIS_MODULE);
-
-	if (athbt_nl_sock == NULL) {
-		BT_ERR("%s NetLink Create Failed\n", __func__);
-		goto free_bsi;
-	}
-
 	return 0;
 
 free_bsi:
@@ -769,9 +699,7 @@ static struct platform_driver bluesleep_driver = {
 	},
 };
 
-
 int __init ath_init(void)
-
 {
 	int ret;
 
@@ -785,7 +713,6 @@ int __init ath_init(void)
 	}
 
 	ret = platform_driver_register(&bluesleep_driver);
-
 	if (ret) {
 		BT_ERR("Failed to register bluesleep driver");
 		return ret;
@@ -797,7 +724,6 @@ int __init ath_init(void)
 int __exit ath_deinit(void)
 {
 	platform_driver_unregister(&bluesleep_driver);
-
 
 	return hci_uart_unregister_proto(&athp);
 }

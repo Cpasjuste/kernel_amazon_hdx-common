@@ -24,13 +24,15 @@
 #include <linux/delay.h>
 #include <linux/input.h>
 #include <linux/firmware.h>
+#ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
+#endif
 #include <linux/input/b_synaptics_dsx.h>
 #include "b_synaptics_dsx_i2c.h"
 
 #define FW_IMAGE_NAME_INX "synaptics/PR1518120-s2718br_00000014.img"
 //This firmware is only valid on DDIC "cut 2" devices from JDI
-#define FW_IMAGE_NAME_JDI "synaptics/PR1567253-s3310bt_000038DB.img"
+#define FW_IMAGE_NAME_JDI "synaptics/PR1522239-s3310B_000023D9.img"
 #define DO_STARTUP_FW_UPDATE
 #define STARTUP_FW_UPDATE_DELAY_MS 1000 /* ms */
 #define FORCE_UPDATE false

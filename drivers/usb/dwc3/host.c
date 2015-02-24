@@ -46,7 +46,11 @@ int dwc3_host_init(struct dwc3 *dwc)
 	int			ret;
 	struct xhci_plat_data	pdata;
 
-	xhci = platform_device_alloc("xhci-hcd", -1);
+	if (!dwc->dotg)
+		xhci = platform_device_alloc("xhci-hcd", 1);
+	else
+		xhci = platform_device_alloc("xhci-hcd", 0);
+
 	if (!xhci) {
 		dev_err(dwc->dev, "couldn't allocate xHCI device\n");
 		ret = -ENOMEM;
@@ -55,6 +59,7 @@ int dwc3_host_init(struct dwc3 *dwc)
 
 	dma_set_coherent_mask(&xhci->dev, dwc->dev->coherent_dma_mask);
 
+	xhci->dev.parent	= dwc->dev;
 	xhci->dev.dma_mask	= dwc->dev->dma_mask;
 	xhci->dev.dma_parms	= dwc->dev->dma_parms;
 
@@ -79,7 +84,6 @@ int dwc3_host_init(struct dwc3 *dwc)
 
 	/* Add XHCI device if !OTG, otherwise OTG takes care of this */
 	if (!dwc->dotg) {
-		xhci->dev.parent = dwc->dev;
 		ret = platform_device_add(xhci);
 		if (ret) {
 			dev_err(dwc->dev, "failed to register xHCI device\n");

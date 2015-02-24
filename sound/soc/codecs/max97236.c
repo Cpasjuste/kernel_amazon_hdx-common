@@ -364,7 +364,7 @@ int max97236_hp_enable(struct snd_soc_codec *codec)
 	struct max97236_priv *max97236 = snd_soc_codec_get_drvdata(codec);
 
 	/* DEBUG */
-	pr_info("%s: enter\n", __func__);
+	pr_debug("%s: enter\n", __func__);
 
 	regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
 		M97236_SHDNN_MASK, M97236_SHDNN_MASK);
@@ -377,7 +377,7 @@ int max97236_hp_disable(struct snd_soc_codec *codec)
 	struct max97236_priv *max97236 = snd_soc_codec_get_drvdata(codec);
 
 	/* DEBUG */
-	pr_info("%s: enter\n", __func__);
+	pr_debug("%s: enter\n", __func__);
 
 	regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
 		M97236_SHDNN_MASK, 0);
@@ -401,15 +401,15 @@ static int max97236_hp_event(struct snd_soc_dapm_widget *w,
 		break;
 
 	case SND_SOC_DAPM_POST_PMD:
-		pr_info("%s: event SND_SOC_DAPM_POST_PMD\n", __func__);
+		pr_debug("%s: event SND_SOC_DAPM_POST_PMD\n", __func__);
 		break;
 
 	case SND_SOC_DAPM_PRE_PMU:
-		pr_info("%s: event SND_SOC_DAPM_PRE_PMU\n", __func__);
+		pr_debug("%s: event SND_SOC_DAPM_PRE_PMU\n", __func__);
 		break;
 
 	default:
-		pr_info("%s: event UNKNOWN\n", __func__);
+		pr_debug("%s: event UNKNOWN\n", __func__);
 		ret = -EINVAL;
 		break;
 	}
@@ -435,15 +435,15 @@ static int max97236_headset_mic_event(struct snd_soc_dapm_widget *w,
 		break;
 
 	case SND_SOC_DAPM_POST_PMD:
-		pr_info("%s: event SND_SOC_DAPM_POST_PMD\n", __func__);
+		pr_debug("%s: event SND_SOC_DAPM_POST_PMD\n", __func__);
 		break;
 
 	case SND_SOC_DAPM_PRE_PMU:
-		pr_info("%s: event SND_SOC_DAPM_PRE_PMU\n", __func__);
+		pr_debug("%s: event SND_SOC_DAPM_PRE_PMU\n", __func__);
 		break;
 
 	default:
-		pr_info("%s: event UNKNOWN\n", __func__);
+		pr_debug("%s: event UNKNOWN\n", __func__);
 		ret = -EINVAL;
 		break;
 	}
@@ -573,7 +573,7 @@ static void max97236_keypress(struct max97236_priv *max97236,
 			        status_reg[0], status_reg[1]);
 			}
 		}
-		dev_info(max97236->codec->dev, "%s %s\n",
+		dev_dbg(max97236->codec->dev, "%s %s\n",
 					press ? (char *) keystr : "BUTTON",
 					press ? "PRESS" : "RELEASE");
 
@@ -606,7 +606,7 @@ static void max97236_report_jack_state(struct max97236_priv *max97236,
 		string_copy(string, "NOTHING", MAX_STRING);
 	}
 
-		dev_info(max97236->codec->dev, "0x%02X, 0x%02X, 0x%02X, 0x%02X - %s\n",
+		dev_dbg(max97236->codec->dev, "0x%02X, 0x%02X, 0x%02X, 0x%02X - %s\n",
 		status_reg[0],
 		status_reg[1],
 		status_reg[2],
@@ -802,7 +802,7 @@ max97236_jack_plugged_10:
 	regmap_read(max97236->regmap, M97236_REG_01_STATUS2, &status_reg[1]);
 	regmap_read(max97236->regmap, M97236_REG_02_STATUS3, &status_reg[2]);
 
-	pr_info("%s: status 0x%02X, 0x%02X, count %d\n", __func__, status_reg[0], status_reg[1], count);
+	pr_debug("%s: status 0x%02X, 0x%02X, count %d\n", __func__, status_reg[0], status_reg[1], count);
 
 	max97236_report_jack_state(max97236, status_reg);
 
@@ -901,17 +901,17 @@ static void max97236_jack_event(struct max97236_priv *max97236)
 	} else {
 		if (max97236_jacksw_active(max97236))
 			goto max97236_jack_event_10;
-		/*
-		regmap_update_bits(max97236->regmap, M97236_REG_07_LEFT_VOLUME,
-				M97236_MUTEL_MASK, M97236_MUTEL_MASK);
-		regmap_update_bits(max97236->regmap, M97236_REG_08_RIGHT_VOLUME,
-				M97236_MUTER_MASK, M97236_MUTER_MASK);
-		*/
+
 		regmap_write(max97236->regmap, M97236_REG_19_STATE_FORCING,
-				M97236_STATE_FLOAT);
-			pr_info("%s: M97236_STATE_FLOAT set\n", __func__);
+				M97236_STATE_HEADPHONES);
+		msleep(20);
+
+		pr_debug("%s: jack removal event\n", __func__);
+
 		regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
 				M97236_SHDNN_MASK, 0);
+		msleep(20);
+
 		max97236->ignore_int = 0;
 		status_reg[0] = 0;
 		status_reg[1] = 0;
@@ -1002,7 +1002,7 @@ max97236_jack_plugged_10:
 	regmap_write(max97236->regmap, M97236_REG_19_STATE_FORCING,
 		force_value);
 	regmap_update_bits(max97236->regmap,
-		M97236_REG_19_STATE_FORCING, 0x20, 0x00);
+			M97236_REG_19_STATE_FORCING, 0x20, 0x00);
 	regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
 		M97236_SHDNN_MASK, M97236_SHDNN_MASK);
 	msleep(10);
@@ -1021,7 +1021,14 @@ max97236_jack_plugged_20:
 	if ((max97236->jack_state == M97236_JACK_STATE_NONE) ||
 		(max97236->jack_state == M97236_JACK_STATE_UNKNOWN)) {
 		regmap_write(max97236->regmap,
-			M97236_REG_19_STATE_FORCING, M97236_STATE_FLOAT);
+			M97236_REG_19_STATE_FORCING, M97236_STATE_HEADPHONES);
+		msleep(20);
+
+		regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
+			M97236_SHDNN_MASK, 0);
+		msleep(20);
+
+
 	} else {
 	   	if (!max97236_jacksw_active(max97236)) {
 			status_reg[0] = 0;
@@ -1055,9 +1062,12 @@ static irqreturn_t max97236_interrupt(int irq, void *data)
 	struct snd_soc_codec *codec = data;
 	struct max97236_priv *max97236 = snd_soc_codec_get_drvdata(codec);
 
- 	dev_info(codec->dev, "***** max97236_interrupt *****\n");
+	dev_dbg(codec->dev, "***** max97236_interrupt *****\n");
 
 	regmap_read(max97236->regmap, M97236_REG_00_STATUS1, &max97236->status0);
+
+	dev_dbg(codec->dev, "%s: status=0x%x ignore=%d\n", __func__,
+		max97236->status0, max97236->ignore_int);
 
 	if ((max97236->status0 & M97236_MCSW_MASK) && (max97236->ignore_int)) {
 		max97236->ignore_int = 0;
@@ -1081,7 +1091,7 @@ static int max97236_dai_digital_mute(struct snd_soc_dai *codec_dai, int mute)
 	struct snd_soc_codec *codec = codec_dai->codec;
 	int reg = mute ? M97236_L_R_MASK | M97236_MUTEL_MASK : M97236_L_R_MASK;
 
-	dev_info(codec->dev, "digital mute %d\n", mute);
+	dev_dbg(codec->dev, "digital mute %d\n", mute);
 
 	snd_soc_update_bits(codec, M97236_REG_07_LEFT_VOLUME,
 			M97236_L_R_MASK | M97236_MUTEL_MASK, reg);
@@ -1139,6 +1149,7 @@ static int test_jack_presence(struct max97236_priv *max97236, int delay)
 #endif
 
 	if ((reg & M97236_JACKSW_MASK) == test_value) {
+		dev_info(max97236->codec->dev, "max97236: jack detected");
 		schedule_delayed_work(&max97236->jack_work,
 			msecs_to_jiffies(delay));
 	} else {
@@ -1152,16 +1163,25 @@ static int test_jack_presence(struct max97236_priv *max97236, int delay)
 		max97236_configure_for_detection(max97236,
 			M97236_AUTO_MODE_1);
 #else
-		/* clear /FORCE bit to ensure hi-Z configures correctly */
-		regmap_write(max97236->regmap, M97236_REG_19_STATE_FORCING,
-				M97236_FORCEN_MASK);
+		/* Exit shutdown to enforce state change */
+		regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
+				M97236_SHDNN_MASK,
+				M97236_SHDNN_MASK);
+		msleep(20);
+
 		/* now set hi-Z */
 		regmap_write(max97236->regmap, M97236_REG_19_STATE_FORCING,
-				M97236_STATE_FLOAT);
-			pr_info("%s: M97236_STATE_FLOAT set\n", __func__);
+				M97236_STATE_HEADPHONES);
+		msleep(20);
+
+		regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
+				M97236_SHDNN_MASK, 0);
+		msleep(20);
+
 		max97236_configure_for_detection(max97236,
 			M97236_AUTO_MODE_0);
 #endif
+		dev_info(max97236->codec->dev, "max97236: jack not detected");
 	}
 
 	return ret;
@@ -1194,16 +1214,16 @@ static int max97236_probe(struct snd_soc_codec *codec)
 	int ret;
 
 #ifdef MAX97236_AUTOMODE1_JACK_DETECTION
-	dev_info(codec->dev, "built on %s at %s, mode is DETECT1\n",
+	dev_dbg(codec->dev, "built on %s at %s, mode is DETECT1\n",
 		__DATE__,
 		__TIME__);
 #else
-	dev_info(codec->dev, "built on %s at %s, mode is DETECT0\n",
+	dev_dbg(codec->dev, "built on %s at %s, mode is DETECT0\n",
 		__DATE__,
 		__TIME__);
 #endif
 
-	dev_info(codec->dev, "build number %s\n", MAX97236_REVISION);
+	dev_dbg(codec->dev, "build number %s\n", MAX97236_REVISION);
 
 	codec->cache_bypass = 1;
 	max97236->codec = codec;
@@ -1229,7 +1249,7 @@ static int max97236_probe(struct snd_soc_codec *codec)
 	}
 
 	reg >>= M97236_ID_SHIFT;
-	dev_info(codec->dev, "MAX97236 ID = 0x%02x\n", reg);
+	dev_dbg(codec->dev, "MAX97236 ID = 0x%02x\n", reg);
 
 	if (reg == M97236_REVA) {
 		max97236->devtype = MAX97236;
@@ -1259,7 +1279,7 @@ static int max97236_probe(struct snd_soc_codec *codec)
                 }
 
                 max97236->irq = gpio_to_irq(pdata->irq_gpio);
-                dev_info(codec->dev,"Setting irq: GPIO %d -> irq %d\n",
+                dev_dbg(codec->dev,"Setting irq: GPIO %d -> irq %d\n",
                                  pdata->irq_gpio, max97236->irq);
 
 	        if ((request_threaded_irq(max97236->irq, NULL, max97236_interrupt,
@@ -1299,7 +1319,7 @@ static int max97236_probe(struct snd_soc_codec *codec)
 	if (ret)
 		dev_err(codec->dev,"install jack error return = %d\n", ret);
 	else {
-		dev_info(codec->dev,"install jack successful\n");
+		dev_dbg(codec->dev,"install jack successful\n");
 		snd_jack_set_key(max97236_headset.jack, SND_JACK_BTN_0 | SND_JACK_BTN_2 | SND_JACK_BTN_4, KEY_MEDIA);
 		max97236_mic_detect(codec, &max97236_headset);
 	}
@@ -1325,13 +1345,27 @@ static int max97236_soc_suspend(struct snd_soc_codec *codec)
 {
 	struct max97236_priv *max97236 = snd_soc_codec_get_drvdata(codec);
 
+	dev_dbg(codec->dev, "suspend enter\n");
 
-	dev_info(max97236->codec->dev, "soc suspend\n");
-	msleep(3000);
+	cancel_delayed_work(&max97236->jack_work);
+
+	disable_irq_nosync(max97236->irq);
+
+	/* set IRQ enables */
+	regmap_write(max97236->regmap, M97236_REG_04_IRQ_MASK1,
+			M97236_IJACKSW_MASK);
+	regmap_write(max97236->regmap, M97236_REG_05_IRQ_MASK2, 0);
+
+	/* force hi-Z */
+	regmap_write(max97236->regmap,
+		M97236_REG_19_STATE_FORCING, M97236_STATE_HEADPHONES);
+	msleep(20);
 
 	regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
 			M97236_SHDNN_MASK, 0);
+	msleep(20);
 
+	regcache_cache_only(max97236->regmap, true);
 	return 0;
 }
 
@@ -1339,11 +1373,20 @@ static int max97236_soc_resume(struct snd_soc_codec *codec)
 {
 	struct max97236_priv *max97236 = snd_soc_codec_get_drvdata(codec);
 
+	regcache_cache_only(max97236->regmap, false);
+	regcache_sync(max97236->regmap);
 
-	dev_info(max97236->codec->dev, "soc resume\n");
-	msleep(3000);
+	max97236_set_clk_dividers(max97236, extclk_freq);
 
-	test_jack_presence(max97236, 10);
+	max97236->jack_state = M97236_JACK_STATE_NONE;
+	max97236->ignore_int = 0;
+	if (test_jack_presence(max97236, 10))
+		snd_soc_jack_report(max97236->jack, max97236->jack_state,
+			       0x7E00000 | SND_JACK_HEADSET | SND_JACK_LINEOUT);
+
+	enable_irq(max97236->irq);
+
+	dev_dbg(codec->dev, "resume exit\n");
 
 	return 0;
 }
@@ -1389,7 +1432,7 @@ static struct max97236_pdata *max97236_of_pdata(struct i2c_client *i2c)
 	pdata->irq_gpio = of_get_named_gpio(dn, "maxim,irq-gpio", 0);
 
 	if (pdata->irq_gpio) {
-		dev_info(&i2c->dev, "max97236: GPIO %d\n", pdata->irq_gpio);
+		dev_dbg(&i2c->dev, "max97236: GPIO %d\n", pdata->irq_gpio);
 	} else {
 		dev_err(&i2c->dev, "max97236: No GPIO value found in dn\n");
 	}
@@ -1450,54 +1493,6 @@ static int max97236_i2c_remove(struct i2c_client *client)
 	return 0;
 }
 
-static int max97236_pm_suspend(struct device *dev)
-{
-	struct max97236_priv *max97236 = dev_get_drvdata(dev);
-
-	dev_info(max97236->codec->dev, "suspend enter\n");
-
-
-	/* set IRQ enables */
-	regmap_write(max97236->regmap, M97236_REG_04_IRQ_MASK1,
-			M97236_IJACKSW_MASK);
-	regmap_write(max97236->regmap, M97236_REG_05_IRQ_MASK2, 0);
-	regmap_update_bits(max97236->regmap, M97236_REG_1D_ENABLE_1,
-			M97236_SHDNN_MASK, 0);
-
-	/* force hi-Z */
-	regmap_write(max97236->regmap,
-		M97236_REG_19_STATE_FORCING, M97236_STATE_FLOAT);
-
-	regcache_cache_only(max97236->regmap, true);
-
-	return 0;
-}
-
-static int max97236_pm_resume(struct device *dev)
-{
-	struct max97236_priv *max97236 = dev_get_drvdata(dev);
-
-	cancel_delayed_work(&max97236->jack_work);
-
-	regcache_cache_only(max97236->regmap, false);
-	/* max97236_reset(max97236); */
-	regcache_sync(max97236->regmap);
-
-	max97236_set_clk_dividers(max97236, extclk_freq);
-
-	max97236->jack_state = M97236_JACK_STATE_NONE;
-	if (test_jack_presence(max97236, 10))
-		snd_soc_jack_report(max97236->jack, max97236->jack_state, SND_JACK_HEADSET | SND_JACK_LINEOUT);
-
-	dev_info(max97236->codec->dev, "resume exit\n");
-
-	return 0;
-}
-
-static struct dev_pm_ops max97236_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(max97236_pm_suspend, max97236_pm_resume)
-};
-
 static const struct i2c_device_id max97236_i2c_id[] = {
 	{ "max97236", MAX97236 },
 	{ }
@@ -1508,7 +1503,6 @@ static struct i2c_driver max97236_i2c_driver = {
 	.driver = {
 		.name = "max97236",
 		.owner = THIS_MODULE,
-		.pm = &max97236_pm,
 	},
 	.probe  = max97236_i2c_probe,
 	.remove = max97236_i2c_remove,

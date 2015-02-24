@@ -19,6 +19,9 @@ config MMC_DEBUG
 	  This is an option for use by developers; most people should
 	  say N here.  This enables MMC core and driver debugging.
 
+config MMC_DEBUG_CRITICAL
+	bool "MMC_DEBUG_CRITICAL"
+
 config MMC_PERF_PROFILING
 	bool "MMC performance profiling"
 	depends on MMC != n

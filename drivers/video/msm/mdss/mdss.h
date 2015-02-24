@@ -15,18 +15,15 @@
 #define MDSS_H
 
 #include <linux/msm_ion.h>
-#include <linux/earlysuspend.h>
 #include <linux/msm_mdp.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
+#include <linux/irqreturn.h>
 
-#include <mach/iommu_domains.h>
+#include <linux/msm_iommu_domains.h>
 
 #include "mdss_panel.h"
-
-#define MDSS_REG_WRITE(addr, val) writel_relaxed(val, mdss_res->mdp_base + addr)
-#define MDSS_REG_READ(addr) readl_relaxed(mdss_res->mdp_base + addr)
 
 #define MAX_DRV_SUP_MMB_BLKS	44
 
@@ -66,6 +63,18 @@ struct mdss_debug_inf {
 	void (*debug_enable_clock)(int on);
 };
 
+struct mdss_fudge_factor {
+	u32 numer;
+	u32 denom;
+};
+
+struct mdss_perf_tune {
+	unsigned long min_mdp_clk;
+	u64 min_bus_vote;
+	u64 min_uhd_bus_vote;
+	u64 min_qhd_bus_vote;
+};
+
 #define MDSS_IRQ_SUSPEND	-1
 #define MDSS_IRQ_RESUME		1
 #define MDSS_IRQ_REQ		0
@@ -79,11 +88,6 @@ struct mdss_intr {
 	spinlock_t lock;
 };
 
-struct mdss_fudge_factor {
-	u32 numer;
-	u32 denom;
-};
-
 struct mdss_prefill_data {
 	u32 ot_bytes;
 	u32 y_buf_bytes;
@@ -92,6 +96,15 @@ struct mdss_prefill_data {
 	u32 post_scaler_pixels;
 	u32 pp_pixels;
 	u32 fbc_lines;
+};
+
+enum mdss_hw_index {
+	MDSS_HW_MDP,
+	MDSS_HW_DSI0,
+	MDSS_HW_DSI1,
+	MDSS_HW_HDMI,
+	MDSS_HW_EDP,
+	MDSS_MAX_HW_BLK
 };
 
 struct mdss_data_type {
@@ -104,9 +117,10 @@ struct mdss_data_type {
 	u32 max_mdp_clk_rate;
 
 	struct platform_device *pdev;
-	char __iomem *mdp_base;
+	char __iomem *mdss_base;
 	size_t mdp_reg_size;
 	char __iomem *vbif_base;
+	char __iomem *mdp_base;
 
 	struct mutex reg_lock;
 
@@ -116,10 +130,14 @@ struct mdss_data_type {
 	u32 irq_buzy;
 	u32 has_bwc;
 	u32 has_decimation;
-	u8 has_wfd_blk;
-	u32 has_no_lut_read;
+	u32 wfd_mode;
+	atomic_t sd_client_count;
 	u8 has_wb_ad;
+	u8 has_non_scalar_rgb;
+	bool has_src_split;
+	bool idle_pc_enabled;
 
+	u32 rotator_ot_limit;
 	u32 mdp_irq_mask;
 	u32 mdp_hist_irq_mask;
 
@@ -127,7 +145,6 @@ struct mdss_data_type {
 	u8 clk_ena;
 	u8 fs_ena;
 	u8 vsync_ena;
-	unsigned long min_mdp_clk;
 
 	u32 res_init;
 
@@ -138,18 +155,21 @@ struct mdss_data_type {
 
 	u32 rot_block_size;
 
-	u32 max_bw_low;
-	u32 max_bw_high;
-
 	u32 axi_port_cnt;
 	u32 curr_bw_uc_idx;
 	u32 bus_hdl;
 	struct msm_bus_scale_pdata *bus_scale_table;
+	u32 max_bw_low;
+	u32 max_bw_high;
+	u32 max_bw_per_pipe;
 
 	struct mdss_fudge_factor ab_factor;
 	struct mdss_fudge_factor ib_factor;
 	struct mdss_fudge_factor ib_factor_overlap;
 	struct mdss_fudge_factor clk_factor;
+
+	u32 enable_bw_release;
+	u32 enable_rotator_bw_release;
 
 	struct mdss_hw_settings *hw_settings;
 
@@ -166,8 +186,10 @@ struct mdss_data_type {
 	struct mdss_mdp_mixer *mixer_wb;
 	u32 nmixers_intf;
 	u32 nmixers_wb;
+
 	struct mdss_mdp_ctl *ctl_off;
 	u32 nctl;
+
 	struct mdss_mdp_dp_intf *dp_off;
 	u32 ndp;
 	void *video_intf;
@@ -186,25 +208,21 @@ struct mdss_data_type {
 	int iommu_attached;
 	struct mdss_iommu_map_type *iommu_map;
 
-	struct early_suspend early_suspend;
 	struct mdss_debug_inf debug_inf;
 	bool mixer_switched;
 	struct mdss_panel_cfg pan_cfg;
+	struct mdss_prefill_data prefill_data;
 
 	int handoff_pending;
-	struct mdss_prefill_data prefill_data;
-	bool ulps;
+	bool idle_pc;
+	struct mdss_perf_tune perf_tune;
+	bool traffic_shaper_en;
+	int iommu_ref_cnt;
+
+	u64 ab[MDSS_MAX_HW_BLK];
+	u64 ib[MDSS_MAX_HW_BLK];
 };
 extern struct mdss_data_type *mdss_res;
-
-enum mdss_hw_index {
-	MDSS_HW_MDP,
-	MDSS_HW_DSI0,
-	MDSS_HW_DSI1,
-	MDSS_HW_HDMI,
-	MDSS_HW_EDP,
-	MDSS_MAX_HW_BLK
-};
 
 struct mdss_hw {
 	u32 hw_ndx;
@@ -217,6 +235,8 @@ void mdss_enable_irq(struct mdss_hw *hw);
 void mdss_disable_irq(struct mdss_hw *hw);
 void mdss_disable_irq_nosync(struct mdss_hw *hw);
 void mdss_bus_bandwidth_ctrl(int enable);
+int mdss_iommu_ctrl(int enable);
+int mdss_bus_scale_set_quota(int client, u64 ab_quota, u64 ib_quota);
 
 static inline struct ion_client *mdss_get_ionclient(void)
 {
@@ -241,5 +261,13 @@ static inline int mdss_get_iommu_domain(u32 type)
 		return -ENODEV;
 
 	return mdss_res->iommu_map[type].domain_idx;
+}
+
+static inline int mdss_get_sd_client_cnt(void)
+{
+	if (!mdss_res)
+		return 0;
+	else
+		return atomic_read(&mdss_res->sd_client_count);
 }
 #endif /* MDSS_H */

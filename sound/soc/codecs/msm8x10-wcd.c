@@ -28,13 +28,13 @@
 #include <linux/of_gpio.h>
 #include <linux/regulator/consumer.h>
 #include <linux/mfd/wcd9xxx/pdata.h>
+#include <soc/qcom/subsystem_notif.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/tlv.h>
-#include <mach/qdsp6v2/apr.h>
-#include <mach/subsystem_notif.h>
+#include <linux/qdsp6v2/apr.h>
 #include "msm8x10-wcd.h"
 #include "wcd9xxx-resmgr.h"
 #include "msm8x10_wcd_registers.h"
@@ -166,6 +166,10 @@ static char on_demand_supply_name[][MAX_ON_DEMAND_SUPPLY_NAME_LENGTH] = {
 	"cdc-vdd-mic-bias",
 	"cdc-vdda-cp",
 };
+
+static int on_demand_regulator_control(struct on_demand_supply *supply,
+				       bool enable,
+				       u8 shift);
 
 struct msm8x10_wcd_priv {
 	struct snd_soc_codec *codec;
@@ -394,6 +398,32 @@ static int __msm8x10_wcd_reg_read(struct msm8x10_wcd *msm8x10_wcd,
 
 	return temp;
 }
+
+static int __msm8x10_wcd_bulk_write(struct msm8x10_wcd *msm8x10_wcd,
+		unsigned short reg, int count, u8 *buf)
+{
+	int ret = -EINVAL;
+	mutex_lock(&msm8x10_wcd->io_lock);
+	if (MSM8X10_WCD_IS_HELICON_REG(reg))
+		ret = msm8x10_wcd_i2c_write(reg, count, buf);
+	else if (MSM8X10_WCD_IS_DINO_REG(reg))
+		ret = msm8x10_wcd_abh_write_device(msm8x10_wcd, reg,
+						buf, count);
+	if (ret < 0)
+		dev_err(msm8x10_wcd->dev,
+				"%s: codec bulk write failed\n", __func__);
+	mutex_unlock(&msm8x10_wcd->io_lock);
+	return ret;
+}
+
+int msm8x10_wcd_bulk_write(struct wcd9xxx_core_resource *core_res,
+			unsigned short reg, int count, u8 *buf)
+{
+	struct msm8x10_wcd *msm8x10_wcd =
+				(struct msm8x10_wcd *) core_res->parent;
+	return __msm8x10_wcd_bulk_write(msm8x10_wcd, reg, count, buf);
+}
+EXPORT_SYMBOL(msm8x10_wcd_bulk_write);
 
 int msm8x10_wcd_reg_read(struct wcd9xxx_core_resource *core_res,
 				unsigned short reg)
@@ -754,6 +784,39 @@ err:
 	return NULL;
 }
 
+static int on_demand_regulator_control(struct on_demand_supply *supply,
+				       bool enable,
+				       u8 shift)
+{
+	int ret = 0;
+
+	if (!supply || !supply->supply)
+		return 0;
+
+	if (enable) {
+		if (atomic_inc_return(&supply->ref) == 1)
+			ret = regulator_enable(supply->supply);
+		if (ret)
+			pr_err("%s: Failed to enable %s\n",
+					__func__,
+					on_demand_supply_name[shift]);
+	} else {
+		if (atomic_read(&supply->ref) == 0) {
+			pr_debug("%s: %s supply has been disabled.\n",
+					__func__, on_demand_supply_name[shift]);
+			return 0;
+		}
+		if (atomic_dec_return(&supply->ref) == 0)
+			ret = regulator_disable(supply->supply);
+		if (ret)
+			pr_err("%s: Failed to disable %s\n",
+					__func__,
+					on_demand_supply_name[shift]);
+	}
+
+	return ret;
+}
+
 static int msm8x10_wcd_codec_enable_on_demand_supply(
 		struct snd_soc_dapm_widget *w,
 		struct snd_kcontrol *kcontrol, int event)
@@ -779,25 +842,14 @@ static int msm8x10_wcd_codec_enable_on_demand_supply(
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		if (atomic_inc_return(&supply->ref) == 1)
-			ret = regulator_enable(supply->supply);
-		if (ret)
-			dev_err(codec->dev, "%s: Failed to enable %s\n",
-				__func__,
-				on_demand_supply_name[w->shift]);
+		ret = on_demand_regulator_control(supply,
+						  true,
+						  w->shift);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		if (atomic_read(&supply->ref) == 0) {
-			dev_dbg(codec->dev, "%s: %s supply has been disabled.\n",
-				 __func__, on_demand_supply_name[w->shift]);
-			goto out;
-		}
-		if (atomic_dec_return(&supply->ref) == 0)
-			ret = regulator_disable(supply->supply);
-			if (ret)
-				dev_err(codec->dev, "%s: Failed to disable %s\n",
-					__func__,
-					on_demand_supply_name[w->shift]);
+		ret = on_demand_regulator_control(supply,
+						  false,
+						  w->shift);
 		break;
 	default:
 		break;
@@ -1131,42 +1183,35 @@ static const struct snd_kcontrol_new msm8x10_wcd_snd_controls[] = {
 	SOC_SINGLE_TLV("HPHR Volume", MSM8X10_WCD_A_RX_HPH_R_GAIN,
 		       0, 12, 1, line_gain),
 
-	SOC_SINGLE_S8_TLV("RX1 Digital Volume",
+	SOC_SINGLE_SX_TLV("RX1 Digital Volume",
 			  MSM8X10_WCD_A_CDC_RX1_VOL_CTL_B2_CTL,
-			  -84, 40, digital_gain),
-	SOC_SINGLE_S8_TLV("RX2 Digital Volume",
+			0,  -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("RX2 Digital Volume",
 			  MSM8X10_WCD_A_CDC_RX2_VOL_CTL_B2_CTL,
-			  -84, 40, digital_gain),
-	SOC_SINGLE_S8_TLV("RX3 Digital Volume",
+			0,  -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("RX3 Digital Volume",
 			  MSM8X10_WCD_A_CDC_RX3_VOL_CTL_B2_CTL,
-			  -84, 40, digital_gain),
+			0, -84, 40, digital_gain),
 
-	SOC_SINGLE_S8_TLV("DEC1 Volume",
+	SOC_SINGLE_SX_TLV("DEC1 Volume",
 			  MSM8X10_WCD_A_CDC_TX1_VOL_CTL_GAIN,
-			  -84, 40, digital_gain),
-	SOC_SINGLE_S8_TLV("DEC2 Volume",
+			0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("DEC2 Volume",
 			  MSM8X10_WCD_A_CDC_TX2_VOL_CTL_GAIN,
-			  -84, 40, digital_gain),
+			0, -84, 40, digital_gain),
 
-	SOC_SINGLE_TLV("ADC1 Volume", MSM8X10_WCD_A_TX_1_EN, 2,
-					19, 0, analog_gain),
-	SOC_SINGLE_TLV("ADC2 Volume", MSM8X10_WCD_A_TX_2_EN, 2,
-					19, 0, analog_gain),
-	SOC_SINGLE_TLV("ADC3 Volume", MSM8X10_WCD_A_TX_3_EN, 2,
-					19, 0, analog_gain),
-
-	SOC_SINGLE_S8_TLV("IIR1 INP1 Volume",
+	SOC_SINGLE_SX_TLV("IIR1 INP1 Volume",
 			  MSM8X10_WCD_A_CDC_IIR1_GAIN_B1_CTL,
-			  -84, 40, digital_gain),
-	SOC_SINGLE_S8_TLV("IIR1 INP2 Volume",
+			 0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("IIR1 INP2 Volume",
 			  MSM8X10_WCD_A_CDC_IIR1_GAIN_B2_CTL,
-			  -84, 40, digital_gain),
-	SOC_SINGLE_S8_TLV("IIR1 INP3 Volume",
+			0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("IIR1 INP3 Volume",
 			  MSM8X10_WCD_A_CDC_IIR1_GAIN_B3_CTL,
-			  -84, 40, digital_gain),
-	SOC_SINGLE_S8_TLV("IIR1 INP4 Volume",
+			0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("IIR1 INP4 Volume",
 			  MSM8X10_WCD_A_CDC_IIR1_GAIN_B4_CTL,
-			  -84,	40, digital_gain),
+			0, -84,	40, digital_gain),
 
 	SOC_ENUM("TX1 HPF cut off", cf_dec1_enum),
 	SOC_ENUM("TX2 HPF cut off", cf_dec2_enum),
@@ -1412,10 +1457,7 @@ static int msm8x10_wcd_put_dec_enum(struct snd_kcontrol *kcontrol,
 	switch (decimator) {
 	case 1:
 	case 2:
-			if ((dec_mux == 3) || (dec_mux == 4))
-				adc_dmic_sel = 0x1;
-			else
-				adc_dmic_sel = 0x0;
+			adc_dmic_sel = 0x0;
 		break;
 	default:
 		dev_err(codec->dev, "%s: Invalid Decimator = %u\n",
@@ -2722,18 +2764,33 @@ static void msm8x10_wcd_mbhc_txfe(struct snd_soc_codec *codec, bool on)
 }
 
 static int msm8x10_wcd_enable_ext_mb_source(struct snd_soc_codec *codec,
-	bool turn_on)
+					    bool turn_on,
+					    bool use_dapm)
 {
 	int ret = 0;
 
-	if (turn_on)
-		ret = snd_soc_dapm_force_enable_pin(&codec->dapm,
-				"MICBIAS_REGULATOR");
-	else
-		ret = snd_soc_dapm_disable_pin(&codec->dapm,
-				"MICBIAS_REGULATOR");
+	if (use_dapm) {
+		if (turn_on)
+			ret = snd_soc_dapm_force_enable_pin(&codec->dapm,
+					"MICBIAS_REGULATOR");
+		else
+			ret = snd_soc_dapm_disable_pin(&codec->dapm,
+					"MICBIAS_REGULATOR");
 
-	snd_soc_dapm_sync(&codec->dapm);
+		snd_soc_dapm_sync(&codec->dapm);
+	} else {
+		struct on_demand_supply *supply;
+		struct msm8x10_wcd_priv *msm8x10_wcd =
+				snd_soc_codec_get_drvdata(codec);
+
+		supply = &msm8x10_wcd->on_demand_list[ON_DEMAND_MICBIAS];
+		if (!supply || !supply->supply || !msm8x10_wcd)
+			return 0;
+
+		ret = on_demand_regulator_control(supply,
+						  turn_on,
+						  ON_DEMAND_MICBIAS);
+	}
 
 	if (ret)
 		dev_err(codec->dev, "%s: Failed to %s external micbias source\n",
@@ -2746,10 +2803,16 @@ static int msm8x10_wcd_enable_ext_mb_source(struct snd_soc_codec *codec,
 }
 
 static int msm8x10_wcd_enable_mbhc_micbias(struct snd_soc_codec *codec,
-	 bool enable)
+					   bool enable,
+					   enum wcd9xxx_micbias_num micb_num)
 {
 	int rc;
 	struct msm8x10_wcd_priv *msm8x10_wcd = snd_soc_codec_get_drvdata(codec);
+
+	if (micb_num != MBHC_MICBIAS1) {
+		rc = -EINVAL;
+		goto err;
+	}
 
 	if (enable)
 		rc = snd_soc_dapm_force_enable_pin(&codec->dapm,
@@ -2766,6 +2829,7 @@ static int msm8x10_wcd_enable_mbhc_micbias(struct snd_soc_codec *codec,
 	}
 	snd_soc_dapm_sync(&codec->dapm);
 
+err:
 	if (rc)
 		pr_debug("%s: Failed to force %s micbias", __func__,
 			enable ? "enable" : "disable");
@@ -2874,8 +2938,8 @@ static int msm8x10_wcd_setup_zdet(struct wcd9xxx_mbhc *mbhc,
 	 } while (0)
 
 	switch (stage) {
-	case PRE_MEAS:
-		dev_dbg(codec->dev, "%s: PRE_MEAS\n", __func__);
+	case MBHC_ZDET_PRE_MEASURE:
+		dev_dbg(codec->dev, "%s: MBHC_ZDET_PRE_MEASURE\n", __func__);
 		INIT_LIST_HEAD(&wcd_priv->reg_save_restore);
 		/* Configure PA */
 		msm8x10_wcd_prepare_hph_pa(mbhc->codec,
@@ -2928,8 +2992,8 @@ static int msm8x10_wcd_setup_zdet(struct wcd9xxx_mbhc *mbhc,
 		msm8x10_wcd_enable_static_pa(mbhc->codec, true);
 		break;
 
-	case POST_MEAS:
-		dev_dbg(codec->dev, "%s: POST_MEAS\n", __func__);
+	case MBHC_ZDET_POST_MEASURE:
+		dev_dbg(codec->dev, "%s: MBHC_ZDET_POST_MEASURE\n", __func__);
 		/* Turn off ICAL */
 		snd_soc_write(codec, WCD9XXX_A_MBHC_SCALING_MUX_2, 0xF0);
 
@@ -2975,10 +3039,14 @@ static int msm8x10_wcd_setup_zdet(struct wcd9xxx_mbhc *mbhc,
 		usleep_range(mux_wait_us,
 				mux_wait_us + WCD9XXX_USLEEP_RANGE_MARGIN_US);
 		break;
-	case PA_DISABLE:
-		dev_dbg(codec->dev, "%s: PA_DISABLE\n", __func__);
+	case MBHC_ZDET_PA_DISABLE:
+		dev_dbg(codec->dev, "%s: MBHC_ZDET_PA_DISABLE\n", __func__);
 		msm8x10_wcd_enable_static_pa(mbhc->codec, false);
 		wcd9xxx_restore_registers(codec, &wcd_priv->reg_save_restore);
+		break;
+	default:
+		dev_dbg(codec->dev, "%s: Case %d not supported\n",
+			__func__, stage);
 		break;
 	}
 #undef __wr
@@ -2986,12 +3054,17 @@ static int msm8x10_wcd_setup_zdet(struct wcd9xxx_mbhc *mbhc,
 	return ret;
 }
 
-static void msm8x10_wcd_compute_impedance(s16 *l, s16 *r, uint32_t *zl,
-					  uint32_t *zr)
+static void msm8x10_wcd_compute_impedance(struct wcd9xxx_mbhc *mbhc, s16 *l,
+					  s16 *r, uint32_t *zl, uint32_t *zr)
 {
 	int zln, zld;
 	int zrn, zrd;
 	int rl = 0, rr = 0;
+
+	if (!mbhc) {
+		pr_err("%s: NULL pointer for MBHC", __func__);
+		return;
+	}
 
 	zln = (l[1] - l[0]) * MSM8X10_WCD_ZDET_MUL_FACTOR;
 	zld = (l[2] - l[0]);
@@ -3095,10 +3168,16 @@ static int adsp_state_callback(struct notifier_block *nb, unsigned long value,
 {
 	bool timedout;
 	unsigned long timeout;
+	static bool booted_once;
 
 	if (value == SUBSYS_BEFORE_SHUTDOWN)
 		msm8x10_wcd_device_down(registered_codec);
 	else if (value == SUBSYS_AFTER_POWERUP) {
+
+		if (!booted_once) {
+			booted_once = true;
+			return NOTIFY_OK;
+		}
 		pr_debug("%s: ADSP is about to power up. bring up codec\n",
 			 __func__);
 
@@ -3507,7 +3586,7 @@ static struct intr_data interrupt_table[] = {
 	{MSM8X10_WCD_IRQ_RESERVED_6, false},
 };
 
-static int __devinit msm8x10_wcd_i2c_probe(struct i2c_client *client,
+static int msm8x10_wcd_i2c_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
 	int ret = 0;
@@ -3617,7 +3696,8 @@ static int __devinit msm8x10_wcd_i2c_probe(struct i2c_client *client,
 					MSM8X10_WCD_NUM_IRQ_REGS,
 					msm8x10_wcd_reg_read,
 					msm8x10_wcd_reg_write,
-					msm8x10_wcd_bulk_read);
+					msm8x10_wcd_bulk_read,
+					msm8x10_wcd_bulk_write);
 	if (wcd9xxx_core_irq_init(core_res)) {
 		dev_err(msm8x10->dev,
 				"%s: irq initialization failed\n", __func__);
@@ -3653,7 +3733,7 @@ static void msm8x10_wcd_device_exit(struct msm8x10_wcd *msm8x10)
 	kfree(msm8x10);
 }
 
-static int __devexit msm8x10_wcd_i2c_remove(struct i2c_client *client)
+static int msm8x10_wcd_i2c_remove(struct i2c_client *client)
 {
 	struct msm8x10_wcd *msm8x10 = dev_get_drvdata(&client->dev);
 
@@ -3732,7 +3812,7 @@ static struct i2c_driver msm8x10_wcd_i2c_driver = {
 	},
 	.id_table               = msm8x10_wcd_id_table,
 	.probe                  = msm8x10_wcd_i2c_probe,
-	.remove                 = __devexit_p(msm8x10_wcd_i2c_remove),
+	.remove                 = msm8x10_wcd_i2c_remove,
 };
 
 static int __init msm8x10_wcd_codec_init(void)

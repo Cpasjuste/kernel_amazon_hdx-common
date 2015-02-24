@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -84,7 +84,11 @@ enum {
 	IDX_AFE_PORT_ID_SECONDARY_PCM_RX = 42,
 	IDX_AFE_PORT_ID_SECONDARY_PCM_TX = 43,
 	IDX_VOICE2_PLAYBACK_TX = 44,
+	IDX_SLIMBUS_6_RX = 45,
+	IDX_SLIMBUS_6_TX = 46,
+	IDX_SPDIF_RX = 47,
 	IDX_GLOBAL_CFG,
+	IDX_AUDIO_PORT_ID_I2S_RX,
 	AFE_MAX_PORTS
 };
 
@@ -150,9 +154,11 @@ int afe_start_pseudo_port(u16 port_id);
 int afe_stop_pseudo_port(u16 port_id);
 uint32_t afe_req_mmap_handle(struct afe_audio_client *ac);
 int afe_unmap_cal_blocks(void);
-int afe_memory_map(u32 dma_addr_p, u32 dma_buf_sz, struct afe_audio_client *ac);
-int afe_cmd_memory_map(u32 dma_addr_p, u32 dma_buf_sz);
-int afe_cmd_memory_map_nowait(int port_id, u32 dma_addr_p, u32 dma_buf_sz);
+int afe_memory_map(phys_addr_t dma_addr_p, u32 dma_buf_sz,
+		struct afe_audio_client *ac);
+int afe_cmd_memory_map(phys_addr_t dma_addr_p, u32 dma_buf_sz);
+int afe_cmd_memory_map_nowait(int port_id, phys_addr_t dma_addr_p,
+			u32 dma_buf_sz);
 int afe_cmd_memory_unmap(u32 dma_addr_p);
 int afe_cmd_memory_unmap_nowait(u32 dma_addr_p);
 void afe_set_dtmf_gen_rx_portid(u16 rx_port_id, int set);
@@ -171,6 +177,10 @@ int afe_port_start(u16 port_id, union afe_port_config *afe_config,
 int afe_spk_prot_feed_back_cfg(int src_port, int dst_port,
 	int l_ch, int r_ch, u32 enable);
 int afe_spk_prot_get_calib_data(struct afe_spkr_prot_get_vi_calib *calib);
+#ifdef CONFIG_SND_SOC_MAX98925//X // AFE
+int afe_dsm_spk_prot_feed_back_cfg(int src_port, struct DSM_Params_Ext_t *prot_config);
+int afe_dsm_spk_prot_get_calib_data(struct afe_dsm_spkr_prot_get_vi_calib *calib);
+#endif
 int afe_port_stop_nowait(int port_id);
 int afe_apply_gain(u16 port_id, u16 gain);
 int afe_q6_interface_prepare(void);
@@ -194,6 +204,14 @@ int afe_set_lpass_clock(u16 port_id, struct afe_clk_cfg *cfg);
 int afe_set_lpass_internal_digital_codec_clock(u16 port_id,
 				struct afe_digital_clk_cfg *cfg);
 int q6afe_check_osr_clk_freq(u32 freq);
+
+int afe_send_spdif_clk_cfg(struct afe_param_id_spdif_clk_cfg *cfg,
+		u16 port_id);
+int afe_send_spdif_ch_status_cfg(struct afe_param_id_spdif_ch_status_cfg
+		*ch_status_cfg,	u16 port_id);
+
+int afe_spdif_port_start(u16 port_id, struct afe_spdif_port_config *spdif_port,
+		u32 rate);
 
 int afe_turn_onoff_hw_mad(u16 mad_type, u16 mad_enable);
 int afe_port_set_mad_type(u16 port_id, enum afe_mad_type mad_type);

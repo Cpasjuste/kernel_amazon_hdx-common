@@ -69,12 +69,13 @@ typedef enum {
 	WEV_RTC,
 	WEV_WIFI,
 	WEV_WAN,
+	WEV_USB,
 	WEV_PWR,
 	WEV_HALL,
 	WEV_BT,
 	WEV_CHARGER,
 	WEV_MAX,
-	WEV_TOTAL = 12
+	WEV_TOTAL = 20
 } wakeup_event_t;
 
 /**
@@ -96,6 +97,8 @@ struct wakeup_event {
 	ktime_t last_time;
 	ktime_t	total_time;
 };
+
+int __init dt_gpio_wake_ev_setup(void);
 
 #ifdef CONFIG_PM_SLEEP
 

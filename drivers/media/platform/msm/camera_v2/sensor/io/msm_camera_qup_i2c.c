@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011, 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,8 +10,7 @@
  * GNU General Public License for more details.
  */
 
-#include <mach/camera2.h>
-#include <linux/module.h>
+#include <soc/qcom/camera2.h>
 #include "msm_camera_i2c.h"
 
 #undef CDBG
@@ -106,7 +105,6 @@ int32_t msm_camera_qup_i2c_read(struct msm_camera_i2c_client *client,
 	S_I2C_DBG("%s addr = 0x%x data: 0x%x\n", __func__, addr, *data);
 	return rc;
 }
-EXPORT_SYMBOL_GPL(msm_camera_qup_i2c_read);
 
 int32_t msm_camera_qup_i2c_read_seq(struct msm_camera_i2c_client *client,
 	uint32_t addr, uint8_t *data, uint32_t num_byte)
@@ -188,7 +186,6 @@ int32_t msm_camera_qup_i2c_write(struct msm_camera_i2c_client *client,
 		S_I2C_DBG("%s fail\n", __func__);
 	return rc;
 }
-EXPORT_SYMBOL_GPL(msm_camera_qup_i2c_write);
 
 int32_t msm_camera_qup_i2c_write_seq(struct msm_camera_i2c_client *client,
 	uint32_t addr, uint8_t *data, uint32_t num_byte)
@@ -217,6 +214,11 @@ int32_t msm_camera_qup_i2c_write_seq(struct msm_camera_i2c_client *client,
 		S_I2C_DBG("%s byte %d: 0x%x\n", __func__,
 			len+1, buf[len+1]);
 		len = 2;
+	}
+	if (num_byte > I2C_SEQ_REG_DATA_MAX) {
+		pr_err("%s: num_byte=%d clamped to max supported %d\n",
+			__func__, num_byte, I2C_SEQ_REG_DATA_MAX);
+		num_byte = I2C_SEQ_REG_DATA_MAX;
 	}
 	for (i = 0; i < num_byte; i++) {
 		buf[i+len] = data[i];
@@ -251,7 +253,7 @@ int32_t msm_camera_qup_i2c_write_table(struct msm_camera_i2c_client *client,
 	client->addr_type = write_setting->addr_type;
 
 	for (i = 0; i < write_setting->size; i++) {
-		CDBG("%s addr %x data %x\n", __func__,
+		CDBG("%s addr 0x%x data 0x%x\n", __func__,
 			reg_setting->reg_addr, reg_setting->reg_data);
 
 		rc = msm_camera_qup_i2c_write(client, reg_setting->reg_addr,
@@ -311,29 +313,31 @@ int32_t msm_camera_qup_i2c_write_seq_table(struct msm_camera_i2c_client *client,
 
 int32_t msm_camera_qup_i2c_write_table_w_microdelay(
 	struct msm_camera_i2c_client *client,
-	struct msm_camera_i2c_reg_tbl *reg_tbl, uint16_t size,
-	enum msm_camera_i2c_data_type data_type)
+	struct msm_camera_i2c_reg_setting *write_setting)
 {
 	int i;
 	int32_t rc = -EFAULT;
+	struct msm_camera_i2c_reg_array *reg_setting = NULL;
 
-	if (!client || !reg_tbl)
+	if (!client || !write_setting)
 		return rc;
 
 	if ((client->addr_type != MSM_CAMERA_I2C_BYTE_ADDR
 		&& client->addr_type != MSM_CAMERA_I2C_WORD_ADDR)
-		|| (data_type != MSM_CAMERA_I2C_BYTE_DATA
-		&& data_type != MSM_CAMERA_I2C_WORD_DATA))
+		|| (write_setting->data_type != MSM_CAMERA_I2C_BYTE_DATA
+		&& write_setting->data_type != MSM_CAMERA_I2C_WORD_DATA))
 		return rc;
 
-	for (i = 0; i < size; i++) {
-		rc = msm_camera_qup_i2c_write(client, reg_tbl->reg_addr,
-			reg_tbl->reg_data, data_type);
+	reg_setting = write_setting->reg_setting;
+	for (i = 0; i < write_setting->size; i++) {
+		rc = msm_camera_qup_i2c_write(client, reg_setting->reg_addr,
+			reg_setting->reg_data, write_setting->data_type);
 		if (rc < 0)
 			break;
-		if (reg_tbl->delay)
-			usleep_range(reg_tbl->delay, reg_tbl->delay + 1000);
-		reg_tbl++;
+		if (reg_setting->delay)
+			usleep_range(reg_setting->delay,
+				reg_setting->delay + 1000);
+		reg_setting++;
 	}
 	return rc;
 }

@@ -25,7 +25,9 @@
 #include <linux/input.h>
 #include <linux/ctype.h>
 #include <linux/hrtimer.h>
+#ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
+#endif
 #include <linux/input/b_synaptics_dsx.h>
 #include "b_synaptics_dsx_i2c.h"
 

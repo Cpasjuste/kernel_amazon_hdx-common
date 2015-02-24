@@ -1,3 +1,11 @@
+/*
+ * bwan.h  --  WAN hardware control driver header file
+ *
+ * Copyright (c) 2005-2014 Lab126, Inc./Amazon Technologies Inc.
+ *   All rights reserved.
+ *
+ */
+
 #ifndef _BWAN_H
 #define _BWAN_H
 

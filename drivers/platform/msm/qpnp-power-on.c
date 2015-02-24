@@ -25,31 +25,30 @@
 #include <linux/qpnp/power-on.h>
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 #include <linux/io.h>
-#include <mach/socinfo.h>
 #include <linux/metricslog.h>
 #endif
 
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 struct pwrkey_struct {
-       struct work_struct work;
-       u8 pwr_stat;
+	struct work_struct work;
+	u8 pwr_stat;
 };
 static struct pwrkey_struct *metrics_work;
 static void pwrkey_metrics(struct work_struct *work)
 {
-       char buf[128];
-       struct pwrkey_struct *metrics_work =
-               container_of(work, struct pwrkey_struct, work);
+	char buf[128];
+	struct pwrkey_struct *metrics_work =
+		container_of(work, struct pwrkey_struct, work);
 
-       if (metrics_work->pwr_stat) {
-               snprintf(buf, sizeof(buf),
-               "powerbutton_irq:def:pwrkey_pressed=1;CT;1:NR");
-               log_to_metrics(ANDROID_LOG_INFO, "pwrkey", buf);
-       } else {
-               snprintf(buf, sizeof(buf),
-               "powerbutton_irq:def:pwrkey_released=1;CT;1:NR");
-               log_to_metrics(ANDROID_LOG_INFO, "pwrkey", buf);
-       }
+	if (metrics_work->pwr_stat) {
+		snprintf(buf, sizeof(buf),
+			"powerbutton_irq:def:pwrkey_pressed=1;CT;1:NR");
+		log_to_metrics(ANDROID_LOG_INFO, "pwrkey", buf);
+	} else {
+		snprintf(buf, sizeof(buf),
+			"powerbutton_irq:def:pwrkey_released=1;CT;1:NR");
+		log_to_metrics(ANDROID_LOG_INFO, "pwrkey", buf);
+	}
 }
 #endif
 
@@ -68,20 +67,10 @@ static void pwrkey_metrics(struct work_struct *work)
 #define QPNP_PON_REASON1(base)			(base + 0x8)
 #define QPNP_PON_WARM_RESET_REASON1(base)	(base + 0xA)
 #define QPNP_PON_WARM_RESET_REASON2(base)	(base + 0xB)
-#define QPNP_PON_SOFT_RESET_REASON1(base)	(base + 0x0E)
-#if defined(CONFIG_AMAZON_METRICS_LOG)
-#define QPNP_PON_POWER_OFF_MASK			0xF
-#define PON_POWER_OFF_HARD_RESET		0x07
-#define QPNP_PON_POFF_REASON_METRICS(base)	(base + 0x8D)
-#define QPNP_PON_METRICS_MAGIC			0xab
-#define QPNP_PON_POFF_REASON_SWWD(base)		(base + 0x8E)
-#define WD_SHUTDOWN_MASK			0x3
-#define THERM_SHUTDOWN_MASK			0x8
-#define SW_WD_CLEAR				0x00
-#define PANIC_METRICS_MASK			0xcd
-#define SWWD_METRICS_MASK			0xab
-#endif
 #define QPNP_POFF_REASON1(base)			(base + 0xC)
+#define QPNP_PON_SOFT_RESET_REASON1(base)	(base + 0x0E)
+#define QPNP_PON_DVDD_RB_SPARE(base)		(base + 0x8D)
+#define QPNP_PON_XVDD_RB_SPARE(base)		(base + 0x8E)
 #define QPNP_PON_KPDPWR_S1_TIMER(base)		(base + 0x40)
 #define QPNP_PON_KPDPWR_S2_TIMER(base)		(base + 0x41)
 #define QPNP_PON_KPDPWR_S2_CNTL(base)		(base + 0x42)
@@ -103,14 +92,16 @@ static void pwrkey_metrics(struct work_struct *work)
 
 #define QPNP_PON_WARM_RESET_TFT			BIT(4)
 
-#define QPNP_WARM_REASON_PMIC_WD		BIT(2)
-#define QPNP_WARM_REASON_PS_HOLD		BIT(1)
-#define QPNP_WARM_REASON_SOFT			BIT(0)
-#define QPNP_PON_REASON_HARD_RESET		BIT(0)
-#define QPNP_POFF_REASON_RESIN			BIT(6)
-#define QPNP_POFF_REASON_PMIC_WD		BIT(2)
-#define QPNP_PON_REASON_USB_CHG			BIT(4)
-#define QPNP_PON_REASON_KPDPWR			BIT(7)
+#define QPNP_WARM_REASON_PMIC_WD	BIT(2)
+#define QPNP_WARM_REASON_PS_HOLD	BIT(1)
+#define QPNP_WARM_REASON_SOFT		BIT(0)
+
+#define QPNP_PON_REASON_HARD_RESET	BIT(0)
+#define QPNP_POFF_REASON_RESIN		BIT(6)
+#define QPNP_POFF_REASON_PMIC_WD	BIT(2)
+#define QPNP_PON_REASON_USB_CHG		BIT(4)
+#define QPNP_PON_REASON_KPDPWR		BIT(7)
+
 #define QPNP_PON_RESIN_PULL_UP			BIT(0)
 #define QPNP_PON_KPDPWR_PULL_UP			BIT(1)
 #define QPNP_PON_CBLPWR_PULL_UP			BIT(2)
@@ -133,6 +124,8 @@ static void pwrkey_metrics(struct work_struct *work)
 #define QPNP_PON_RESET_EN			BIT(7)
 #define QPNP_PON_POWER_OFF_MASK			0xF
 
+#define QPNP_PON_UVLO_DLOAD_EN		BIT(7)
+
 /* Ranges */
 #define QPNP_PON_S1_TIMER_MAX			10256
 #define QPNP_PON_S2_TIMER_MAX			2000
@@ -140,9 +133,25 @@ static void pwrkey_metrics(struct work_struct *work)
 #define QPNP_PON_S3_DBC_DELAY_MASK		0x07
 #define QPNP_PON_RESET_TYPE_MAX			0xF
 #define PON_S1_COUNT_MAX			0xF
+#define QPNP_PON_MIN_DBC_US			(USEC_PER_SEC / 64)
+#define QPNP_PON_MAX_DBC_US			(USEC_PER_SEC * 2)
 
 #define QPNP_KEY_STATUS_DELAY			msecs_to_jiffies(250)
 #define QPNP_PON_REV_B				0x01
+
+#define QPNP_PON_BUFFER_SIZE			9
+
+#define QPNP_PON_CHARGE_MODE_MASK		0x0F
+#define QPNP_PON_CHARGE_MODE_MAGIC		0x0B
+#define METRICS_NORM_POWEROFF_MASK		0xF0
+#define METRICS_NORM_POWEROFF_MAGIC		0xA0
+#define METRICS_PANIC_MASK			0xFF
+#define METRICS_SWWD_MAGIC			0xAA
+#define METRICS_WDOG_MAGIC			0xAB
+#define METRICS_THERMAL_MAGIC			0xAC
+#define METRICS_PANIC_MAGIC			0xCD
+
+#define WD_METRICS_MASK				0x3
 
 enum pon_type {
 	PON_KPDPWR,
@@ -163,6 +172,7 @@ struct qpnp_pon_config {
 	u32 bark_irq;
 	u16 s2_cntl_addr;
 	u16 s2_cntl2_addr;
+	bool old_state;
 	bool use_bark;
 };
 
@@ -174,17 +184,15 @@ struct qpnp_pon {
 	u16 base;
 	struct delayed_work bark_work;
 	struct delayed_work kpdpwr_bark_work;
+	u32 dbc;
 };
 
 static struct qpnp_pon *sys_reset_dev;
 
-static u32 s1_delay[PON_S1_COUNT_MAX + 1] = {
-	0 , 32, 56, 80, 138, 184, 272, 408, 608, 904, 1352, 2048,
-	3072, 4480, 6720, 10256
-};
-
-static char g_power_on_reason[50] = {0};
-static char g_reset_reason[50] = {0};
+#define MAX_REASON_LEN	50
+static char g_power_on_reason[MAX_REASON_LEN] = {0};
+static char g_reset_reason[MAX_REASON_LEN] = {0};
+static atomic_t charge_mode;
 
 static ssize_t power_on_reason_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -218,6 +226,11 @@ static struct attribute *qpnp_attrs[] = {
 
 static struct attribute_group qpnp_attrs_group = {
     .attrs = qpnp_attrs,
+};
+
+static u32 s1_delay[PON_S1_COUNT_MAX + 1] = {
+	0 , 32, 56, 80, 138, 184, 272, 408, 608, 904, 1352, 2048,
+	3072, 4480, 6720, 10256
 };
 
 static const char * const qpnp_pon_reason[] = {
@@ -275,6 +288,75 @@ qpnp_pon_masked_write(struct qpnp_pon *pon, u16 addr, u8 mask, u8 val)
 	return rc;
 }
 
+static int qpnp_pon_set_dbc(struct qpnp_pon *pon, u32 delay)
+{
+	int rc = 0;
+	u32 delay_reg;
+
+	mutex_lock(&pon->pon_input->mutex);
+	if (delay == pon->dbc)
+		goto unlock;
+
+	if (delay < QPNP_PON_MIN_DBC_US)
+		delay = QPNP_PON_MIN_DBC_US;
+	else if (delay > QPNP_PON_MAX_DBC_US)
+		delay = QPNP_PON_MAX_DBC_US;
+
+	delay_reg = (delay << QPNP_PON_DELAY_BIT_SHIFT) / USEC_PER_SEC;
+	delay_reg = ilog2(delay_reg);
+	rc = qpnp_pon_masked_write(pon, QPNP_PON_DBC_CTL(pon->base),
+					QPNP_PON_DBC_DELAY_MASK, delay_reg);
+	if (rc) {
+		dev_err(&pon->spmi->dev, "Unable to set PON debounce\n");
+		goto unlock;
+	}
+
+	pon->dbc = delay;
+
+unlock:
+	mutex_unlock(&pon->pon_input->mutex);
+	return rc;
+}
+
+static ssize_t qpnp_pon_dbc_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct qpnp_pon *pon = dev_get_drvdata(dev);
+
+	return snprintf(buf, QPNP_PON_BUFFER_SIZE, "%d\n", pon->dbc);
+}
+
+static ssize_t qpnp_pon_dbc_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t size)
+{
+	struct qpnp_pon *pon = dev_get_drvdata(dev);
+	unsigned long value;
+	int rc;
+
+	if (size > QPNP_PON_BUFFER_SIZE)
+		return -EINVAL;
+
+	rc = kstrtoul(buf, 10, &value);
+	if (rc)
+		return rc;
+
+	rc = qpnp_pon_set_dbc(pon, value);
+	if (rc < 0)
+		return rc;
+
+	return size;
+}
+
+static DEVICE_ATTR(debounce_us, 0664, qpnp_pon_dbc_show, qpnp_pon_dbc_store);
+
+void qpnp_pon_charge_mode_enable(void)
+{
+	atomic_set(&charge_mode, 1);
+}
+
+EXPORT_SYMBOL(qpnp_pon_charge_mode_enable);
+
 /**
  * qpnp_pon_system_pwr_off - Configure system-reset PMIC for shutdown or reset
  * @type: Determines the type of power off to perform - shutdown, reset, etc
@@ -293,6 +375,14 @@ int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
 
 	if (!pon)
 		return -ENODEV;
+
+	/* Enter charge mode on shutdown if cable is connected */
+	if (type == PON_POWER_OFF_SHUTDOWN && atomic_read(&charge_mode)) {
+		qpnp_pon_masked_write(pon,
+				QPNP_PON_DVDD_RB_SPARE(pon->base),
+				QPNP_PON_CHARGE_MODE_MASK,
+				QPNP_PON_CHARGE_MODE_MAGIC);
+	}
 
 	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
 			QPNP_PON_REVISION2(pon->base), &reg, 1);
@@ -340,74 +430,25 @@ int qpnp_pon_system_pwr_off(enum pon_power_off_type type)
 EXPORT_SYMBOL(qpnp_pon_system_pwr_off);
 
 #if defined(CONFIG_AMAZON_METRICS_LOG)
-int qpnp_pon_panic_indcator(void)
-{
-	int rc;
-	u8 panic_indicator;
-
-	struct qpnp_pon *pon = sys_reset_dev;
-	if (!pon)
-		return -ENODEV;
-
-	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
-				QPNP_PON_POFF_REASON_SWWD(pon->base),
-				&panic_indicator, 1);
-	if (rc) {
-		dev_err(&pon->spmi->dev, "Unable to read panic indicator\n");
-		return rc;
-	}
-	if (panic_indicator == PANIC_METRICS_MASK)
-		return 1;
-	else
-		return 0;
-}
-EXPORT_SYMBOL(qpnp_pon_panic_indcator);
-
 int qpnp_pon_record_sw_wd(bool from_charging)
 {
 	int rc;
-	u16 wdreg1, temp_wdreg;
-	u8 wdreg = PANIC_METRICS_MASK;
+	u8 wdreg;
 
 	struct qpnp_pon *pon = sys_reset_dev;
 	if (!pon)
 		return -ENODEV;
 
-	if (from_charging) {
-		rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
-				QPNP_PON_POFF_REASON_SWWD(pon->base),
-				(u8 *) &wdreg1, 2);
-		if (rc) {
-			dev_err(&pon->spmi->dev,
-				"Unable to read wdreg1\n");
-			return rc;
-		}
+	wdreg = (from_charging) ? METRICS_SWWD_MAGIC : METRICS_PANIC_MAGIC;
 
-		temp_wdreg = wdreg1 & 0x00FF;
-		wdreg1 = temp_wdreg >> 8;
-		wdreg1 |= SWWD_METRICS_MASK;
-		wdreg1 = wdreg1 << 8;
-		temp_wdreg = temp_wdreg | wdreg1;
-
-		rc = spmi_ext_register_writel(pon->spmi->ctrl, pon->spmi->sid,
-					QPNP_PON_POFF_REASON_SWWD(pon->base),
-					(u8 *) &temp_wdreg, 2);
-
-		if (rc) {
-			dev_err(&pon->spmi->dev,
-				"Unable to write temp_wdreg\n");
-			return rc;
-		}
-	} else {
-		rc = spmi_ext_register_writel(pon->spmi->ctrl, pon->spmi->sid,
-				QPNP_PON_POFF_REASON_SWWD(pon->base),
-				&wdreg, 1);
-		udelay(500);
-		if (rc) {
-			dev_err(&pon->spmi->dev,
-				"Unable to write wdreg\n");
-			return rc;
-		}
+	rc = qpnp_pon_masked_write(pon,
+				QPNP_PON_XVDD_RB_SPARE(pon->base),
+				METRICS_PANIC_MASK,
+				wdreg);
+	if (rc) {
+		dev_err(&pon->spmi->dev,
+			"Unable to write wdreg\n");
+		return rc;
 	}
 
 	return rc;
@@ -417,15 +458,15 @@ EXPORT_SYMBOL(qpnp_pon_record_sw_wd);
 int qpnp_pon_record_normpoff(void)
 {
 	int rc;
-	u8 record_metrics = QPNP_PON_METRICS_MAGIC;
 	struct qpnp_pon *pon = sys_reset_dev;
 
 	if (!pon)
 		return -ENODEV;
 
-	rc = spmi_ext_register_writel(pon->spmi->ctrl, pon->spmi->sid,
-					QPNP_PON_POFF_REASON_METRICS(pon->base),
-					&record_metrics, 1);
+	rc = qpnp_pon_masked_write(pon,
+				QPNP_PON_DVDD_RB_SPARE(pon->base),
+				METRICS_NORM_POWEROFF_MASK,
+				METRICS_NORM_POWEROFF_MAGIC);
 	if (rc) {
 		dev_err(&pon->spmi->dev,
 				"Unable to write record_metrics\n");
@@ -559,6 +600,7 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	int rc;
 	struct qpnp_pon_config *cfg = NULL;
 	u8 pon_rt_sts = 0, pon_rt_bit = 0;
+	u32 key_status;
 
 	cfg = qpnp_get_cfg(pon, pon_type);
 	if (!cfg)
@@ -580,8 +622,8 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	case PON_KPDPWR:
 		pon_rt_bit = QPNP_PON_KPDPWR_N_SET;
 #if defined(CONFIG_AMAZON_METRICS_LOG)
-               metrics_work->pwr_stat = (pon_rt_sts & pon_rt_bit);
-               schedule_work(&metrics_work->work);
+		metrics_work->pwr_stat = (pon_rt_sts & pon_rt_bit);
+		schedule_work(&metrics_work->work);
 #endif
 		break;
 	case PON_RESIN:
@@ -597,9 +639,22 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 		return -EINVAL;
 	}
 
-	input_report_key(pon->pon_input, cfg->key_code,
-					(pon_rt_sts & pon_rt_bit));
+	pr_debug("PMIC input: code=%d, sts=0x%x\n",
+					cfg->key_code, pon_rt_sts);
+	key_status = pon_rt_sts & pon_rt_bit;
+
+	/* simulate press event in case release event occured
+	 * without a press event
+	 */
+	if (!cfg->old_state && !key_status) {
+		input_report_key(pon->pon_input, cfg->key_code, 1);
+		input_sync(pon->pon_input);
+	}
+
+	input_report_key(pon->pon_input, cfg->key_code, key_status);
 	input_sync(pon->pon_input);
+
+	cfg->old_state = !!key_status;
 
 	return 0;
 }
@@ -659,6 +714,54 @@ static irqreturn_t qpnp_cblpwr_irq(int irq, void *_pon)
 	rc = qpnp_pon_input_dispatch(pon, PON_CBLPWR);
 	if (rc)
 		dev_err(&pon->spmi->dev, "Unable to send input event\n");
+
+	return IRQ_HANDLED;
+}
+
+static void print_pon_reg(struct qpnp_pon *pon, u16 offset)
+{
+	int rc;
+	u16 addr;
+	u8 reg;
+
+	addr = pon->base + offset;
+	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
+			addr, &reg, 1);
+	if (rc)
+		dev_emerg(&pon->spmi->dev,
+				"Unable to read reg at 0x%04x\n", addr);
+	else
+		dev_emerg(&pon->spmi->dev, "reg@0x%04x: %02x\n", addr, reg);
+}
+
+#define PON_PBL_STATUS			0x7
+#define PON_PON_REASON1			0x8
+#define PON_PON_REASON2			0x9
+#define PON_WARM_RESET_REASON1		0xA
+#define PON_WARM_RESET_REASON2		0xB
+#define PON_POFF_REASON1		0xC
+#define PON_POFF_REASON2		0xD
+#define PON_SOFT_RESET_REASON1		0xE
+#define PON_SOFT_RESET_REASON2		0xF
+#define PON_PMIC_WD_RESET_S1_TIMER	0x54
+#define PON_PMIC_WD_RESET_S2_TIMER	0x55
+static irqreturn_t qpnp_pmic_wd_bark_irq(int irq, void *_pon)
+{
+	struct qpnp_pon *pon = _pon;
+
+	print_pon_reg(pon, PON_PBL_STATUS);
+	print_pon_reg(pon, PON_PBL_STATUS);
+	print_pon_reg(pon, PON_PON_REASON1);
+	print_pon_reg(pon, PON_PON_REASON2);
+	print_pon_reg(pon, PON_WARM_RESET_REASON1);
+	print_pon_reg(pon, PON_WARM_RESET_REASON2);
+	print_pon_reg(pon, PON_POFF_REASON1);
+	print_pon_reg(pon, PON_POFF_REASON2);
+	print_pon_reg(pon, PON_SOFT_RESET_REASON1);
+	print_pon_reg(pon, PON_SOFT_RESET_REASON2);
+	print_pon_reg(pon, PON_PMIC_WD_RESET_S1_TIMER);
+	print_pon_reg(pon, PON_PMIC_WD_RESET_S2_TIMER);
+	panic("PMIC Watch dog triggered");
 
 	return IRQ_HANDLED;
 }
@@ -748,7 +851,7 @@ err_exit:
 	return IRQ_HANDLED;
 }
 
-static int __devinit
+static int 
 qpnp_config_pull(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 {
 	int rc;
@@ -779,7 +882,7 @@ qpnp_config_pull(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 	return rc;
 }
 
-static int __devinit
+static int 
 qpnp_config_reset(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 {
 	int rc;
@@ -855,7 +958,7 @@ qpnp_config_reset(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 	return 0;
 }
 
-static int __devinit
+static int 
 qpnp_pon_request_irqs(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 {
 	int rc = 0;
@@ -938,7 +1041,14 @@ qpnp_pon_request_irqs(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 
 	/* mark the interrupts wakeable if they support linux-key */
 	if (cfg->key_code) {
+/* make volume down key wakeup disable */
+#if !defined(CONFIG_ARCH_APQ8084_LOKI) && !defined(CONFIG_ARCH_APQ8084_SATURN)
 		enable_irq_wake(cfg->state_irq);
+#else
+		if(cfg->pon_type != PON_RESIN)
+			enable_irq_wake(cfg->state_irq);
+#endif
+
 		/* special handling for RESIN due to a hardware bug */
 		if (cfg->pon_type == PON_RESIN && cfg->support_reset)
 			enable_irq_wake(cfg->bark_irq);
@@ -947,7 +1057,7 @@ qpnp_pon_request_irqs(struct qpnp_pon *pon, struct qpnp_pon_config *cfg)
 	return rc;
 }
 
-static int __devinit
+static int 
 qpnp_pon_config_input(struct qpnp_pon *pon,  struct qpnp_pon_config *cfg)
 {
 	if (!pon->pon_input) {
@@ -968,9 +1078,9 @@ qpnp_pon_config_input(struct qpnp_pon *pon,  struct qpnp_pon_config *cfg)
 	return 0;
 }
 
-static int __devinit qpnp_pon_config_init(struct qpnp_pon *pon)
+static int qpnp_pon_config_init(struct qpnp_pon *pon)
 {
-	int rc = 0, i = 0;
+	int rc = 0, i = 0, pmic_wd_bark_irq;
 	struct device_node *pp = NULL;
 	struct qpnp_pon_config *cfg;
 	u8 pon_ver;
@@ -1191,6 +1301,21 @@ static int __devinit qpnp_pon_config_init(struct qpnp_pon *pon)
 		}
 	}
 
+	pmic_wd_bark_irq = spmi_get_irq_byname(pon->spmi, NULL, "pmic-wd-bark");
+	/* request the pmic-wd-bark irq only if it is defined */
+	if (pmic_wd_bark_irq >= 0) {
+		rc = devm_request_irq(&pon->spmi->dev, pmic_wd_bark_irq,
+					qpnp_pmic_wd_bark_irq,
+					IRQF_TRIGGER_RISING,
+					"qpnp_pmic_wd_bark", pon);
+		if (rc < 0) {
+			dev_err(&pon->spmi->dev,
+				"Can't request %d IRQ\n",
+					pmic_wd_bark_irq);
+			goto free_input_dev;
+		}
+	}
+
 	/* register the input device */
 	if (pon->pon_input) {
 		rc = input_register_device(pon->pon_input);
@@ -1238,19 +1363,18 @@ free_input_dev:
 	return rc;
 }
 
-static int __devinit qpnp_pon_print_reset_reason(struct qpnp_pon *pon)
+static int qpnp_pon_print_reset_reason(struct qpnp_pon *pon)
 {
 	int rc;
 	u8 pbl_status, pon_reason;
 	u16 warm_reason, poff_reason, soft_reason;
 	char *reset_reason;
 	char *poweron_reason = NULL;
-	u8 poff_metrics;
+#if defined(CONFIG_AMAZON_METRICS_LOG)
+	u8 poff_metrics, swwd_metrics;
 	u8 clear_metrics = 0x00;
-	void __iomem *sw_watchdog;
-	u8 wdreg;
-	u16 swwd_metrics, clear_two = 0x0000;
 	char buf[128];
+#endif
 
 	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
 				QPNP_PON_PON_PBL_STATUS(pon->base), &pbl_status, 1);
@@ -1299,17 +1423,19 @@ static int __devinit qpnp_pon_print_reset_reason(struct qpnp_pon *pon)
 		dev_err(&pon->spmi->dev, "Unable to read soft reset reason\n");
 		return rc;
 	}
-
+#if defined(CONFIG_AMAZON_METRICS_LOG)
 	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
-				QPNP_PON_POFF_REASON_METRICS(pon->base),
+				QPNP_PON_DVDD_RB_SPARE(pon->base),
 				(u8 *) &poff_metrics, 1);
 	if (rc) {
 		dev_err(&pon->spmi->dev, "Unable to read poff_metrics reason\n");
 		return rc;
 	}
+	poff_metrics &= METRICS_NORM_POWEROFF_MASK;
+
 	/* make sure to clear the register */
 	rc = spmi_ext_register_writel(pon->spmi->ctrl, pon->spmi->sid,
-				QPNP_PON_POFF_REASON_METRICS(pon->base),
+				QPNP_PON_DVDD_RB_SPARE(pon->base),
 				&clear_metrics, 1);
 	if (rc) {
 		dev_err(&pon->spmi->dev, "Unable to write clear_metrics status\n");
@@ -1317,8 +1443,8 @@ static int __devinit qpnp_pon_print_reset_reason(struct qpnp_pon *pon)
 	}
 
 	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
-				QPNP_PON_POFF_REASON_SWWD(pon->base),
-				(u8 *) &swwd_metrics, 2);
+				QPNP_PON_XVDD_RB_SPARE(pon->base),
+				&swwd_metrics, 1);
 
 	if (rc) {
 		dev_err(&pon->spmi->dev, "Unable to read swwd_metrics reason\n");
@@ -1326,45 +1452,50 @@ static int __devinit qpnp_pon_print_reset_reason(struct qpnp_pon *pon)
 	}
 	/* make sure to clear the register */
 	rc = spmi_ext_register_writel(pon->spmi->ctrl, pon->spmi->sid,
-				QPNP_PON_POFF_REASON_SWWD(pon->base),
-				(u8 *) &clear_two, 2);
+				QPNP_PON_XVDD_RB_SPARE(pon->base),
+				&clear_metrics, 1);
 	if (rc) {
 		dev_err(&pon->spmi->dev, "Unable to write sw clear_metrics status\n");
 		return rc;
 	}
-
-	sw_watchdog = sw_wd_reg_addr();
-	wdreg = readb_relaxed(sw_watchdog + 0x17C0);
-
+#endif
 	if (warm_reason) {
-		if ((swwd_metrics & 0xFF00) == 0xab00)
-			reset_reason = "warm_reset";
-		else if ((swwd_metrics & 0x00FF) == PANIC_METRICS_MASK)
-			reset_reason = "panic_reset";
-		else if (wdreg & THERM_SHUTDOWN_MASK)
-			reset_reason = "thermal_reset";
-		else if (wdreg & WD_SHUTDOWN_MASK)
-			reset_reason = "watchdog_reset";
-		else if (warm_reason & QPNP_WARM_REASON_PMIC_WD)
+		if (warm_reason & QPNP_WARM_REASON_PMIC_WD) {
 			reset_reason = "pmic_watchdog";
-		else
+		}
+#if defined(CONFIG_AMAZON_METRICS_LOG)
+		else if (swwd_metrics == METRICS_PANIC_MAGIC)
+			reset_reason = "panic_reset";
+		else if (swwd_metrics == METRICS_WDOG_MAGIC)
+			reset_reason = "watchdog_reset";
+		else if (swwd_metrics == METRICS_THERMAL_MAGIC)
+			reset_reason = "thermal_shutdown";
+#endif
+		else {
 			reset_reason = "warm_reset";
+		}
 	} else if (pon_reason & QPNP_PON_REASON_HARD_RESET) {
 		if (poff_reason &
 			(QPNP_POFF_REASON_RESIN | QPNP_POFF_REASON_PMIC_WD))
 			reset_reason = "pmic_watchdog";
-		else if ((swwd_metrics & 0x00FF) == PANIC_METRICS_MASK)
+#if defined(CONFIG_AMAZON_METRICS_LOG)
+		else if (swwd_metrics == METRICS_PANIC_MAGIC)
 			reset_reason = "panic_reset";
+#endif
 		else
-			reset_reason = "warm_reset";
+			reset_reason = "reset";
 	} else {
-		if (poff_metrics == QPNP_PON_METRICS_MAGIC)
+#if defined(CONFIG_AMAZON_METRICS_LOG)
+		if (poff_metrics == METRICS_NORM_POWEROFF_MAGIC)
 			reset_reason = "normal_shutdown";
 		else
 			reset_reason = "long_key_press";
+#else
+		reset_reason = "unknown";
+#endif
 	}
 	dev_info(&pon->spmi->dev, "reboot reason: %s\n", reset_reason);
-	sprintf(g_reset_reason, "%s", reset_reason);
+	snprintf(g_reset_reason, MAX_REASON_LEN, "%s", reset_reason);
 
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 	snprintf(buf, sizeof(buf),
@@ -1395,15 +1526,87 @@ static int __devinit qpnp_pon_print_reset_reason(struct qpnp_pon *pon)
 #endif
 	}
 
-	dev_info(&pon->spmi->dev,
+	dev_dbg(&pon->spmi->dev,
 		"%s: pbl=0x%02x pon=0x%02x warm=0x%04x poff=0x%04x soft=0x%0x\n",
 		__func__, pbl_status, pon_reason,
 		warm_reason, poff_reason, soft_reason);
 
 	return rc;
 }
+static bool dload_on_uvlo;
 
-static int __devinit qpnp_pon_probe(struct spmi_device *spmi)
+static int qpnp_pon_debugfs_uvlo_dload_get(char *buf,
+		const struct kernel_param *kp)
+{
+	struct qpnp_pon *pon = sys_reset_dev;
+	int rc = 0;
+	u8 reg;
+
+	if (!pon)
+		return -ENODEV;
+
+	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
+			QPNP_PON_XVDD_RB_SPARE(pon->base), &reg, 1);
+	if (rc) {
+		dev_err(&pon->spmi->dev,
+			"Unable to read addr=%x, rc(%d)\n",
+			QPNP_PON_XVDD_RB_SPARE(pon->base), rc);
+		return rc;
+	}
+
+	return snprintf(buf, PAGE_SIZE, "%d",
+			!!(QPNP_PON_UVLO_DLOAD_EN & reg));
+}
+
+static int qpnp_pon_debugfs_uvlo_dload_set(const char *val,
+		const struct kernel_param *kp)
+{
+	struct qpnp_pon *pon = sys_reset_dev;
+	int rc = 0;
+	u8 reg;
+
+	if (!pon)
+		return -ENODEV;
+
+	rc = param_set_bool(val, kp);
+	if (rc) {
+		pr_err("Unable to set bms_reset: %d\n", rc);
+		return rc;
+	}
+
+	rc = spmi_ext_register_readl(pon->spmi->ctrl, pon->spmi->sid,
+			QPNP_PON_XVDD_RB_SPARE(pon->base), &reg, 1);
+	if (rc) {
+		dev_err(&pon->spmi->dev,
+			"Unable to read addr=%x, rc(%d)\n",
+			QPNP_PON_XVDD_RB_SPARE(pon->base), rc);
+		return rc;
+	}
+
+	reg &= ~QPNP_PON_UVLO_DLOAD_EN;
+	if (*(bool *)kp->arg)
+		reg |= QPNP_PON_UVLO_DLOAD_EN;
+
+	rc = spmi_ext_register_writel(pon->spmi->ctrl, pon->spmi->sid,
+			QPNP_PON_XVDD_RB_SPARE(pon->base), &reg, 1);
+	if (rc) {
+		dev_err(&pon->spmi->dev,
+			"Unable to write to addr=%hx, rc(%d)\n",
+				QPNP_PON_XVDD_RB_SPARE(pon->base), rc);
+		return rc;
+	}
+
+	return 0;
+}
+
+static struct kernel_param_ops dload_on_uvlo_ops = {
+	.set = qpnp_pon_debugfs_uvlo_dload_set,
+	.get = qpnp_pon_debugfs_uvlo_dload_get,
+};
+
+module_param_cb(dload_on_uvlo, &dload_on_uvlo_ops, &dload_on_uvlo, 0644);
+
+static int qpnp_pon_probe(struct spmi_device *spmi)
 {
 	struct qpnp_pon *pon;
 	struct resource *pon_resource;
@@ -1460,6 +1663,8 @@ static int __devinit qpnp_pon_probe(struct spmi_device *spmi)
 		return rc;
 	}
 
+	boot_reason = ffs(pon_sts);
+
 	index = ffs(pon_sts) - 1;
 	cold_boot = !qpnp_pon_is_warm_reset();
 	if (index >= ARRAY_SIZE(qpnp_pon_reason) || index < 0)
@@ -1491,24 +1696,6 @@ static int __devinit qpnp_pon_probe(struct spmi_device *spmi)
 				"PMIC@SID%d: Power-off reason: %s\n",
 				pon->spmi->sid,
 				qpnp_poff_reason[index]);
-
-	rc = of_property_read_u32(pon->spmi->dev.of_node,
-				"qcom,pon-dbc-delay", &delay);
-	if (rc) {
-		if (rc != -EINVAL) {
-			dev_err(&spmi->dev, "Unable to read debounce delay\n");
-			return rc;
-		}
-	} else {
-		delay = (delay << QPNP_PON_DELAY_BIT_SHIFT) / USEC_PER_SEC;
-		delay = ilog2(delay);
-		rc = qpnp_pon_masked_write(pon, QPNP_PON_DBC_CTL(pon->base),
-						QPNP_PON_DBC_DELAY_MASK, delay);
-		if (rc) {
-			dev_err(&spmi->dev, "Unable to set PON debounce\n");
-			return rc;
-		}
-	}
 
 	/* program s3 debounce */
 	rc = of_property_read_u32(pon->spmi->dev.of_node,
@@ -1542,11 +1729,11 @@ static int __devinit qpnp_pon_probe(struct spmi_device *spmi)
 	INIT_DELAYED_WORK(&pon->kpdpwr_bark_work, kpdpwr_bark_work_func);
 
 #if defined(CONFIG_AMAZON_METRICS_LOG)
-       metrics_work = kzalloc(sizeof(struct pwrkey_struct), GFP_KERNEL);
-       if (!metrics_work)
-               dev_err(&spmi->dev, "Can't allocate metrics_work\n");
-       else
-               INIT_WORK(&metrics_work->work, pwrkey_metrics);
+	metrics_work = kzalloc(sizeof(struct pwrkey_struct), GFP_KERNEL);
+	if (!metrics_work)
+		dev_err(&spmi->dev, "Can't allocate metrics_work\n");
+	else
+		INIT_WORK(&metrics_work->work, pwrkey_metrics);
 #endif
 
 	/* register the PON configurations */
@@ -1564,6 +1751,25 @@ static int __devinit qpnp_pon_probe(struct spmi_device *spmi)
 		return rc;
 	}
 
+	rc = of_property_read_u32(pon->spmi->dev.of_node,
+				"qcom,pon-dbc-delay", &delay);
+	if (rc) {
+		if (rc != -EINVAL) {
+			dev_err(&spmi->dev, "Unable to read debounce delay\n");
+			return rc;
+		}
+	} else {
+		rc = qpnp_pon_set_dbc(pon, delay);
+		if (rc)
+			return rc;
+	}
+
+	rc = device_create_file(&spmi->dev, &dev_attr_debounce_us);
+	if (rc) {
+		dev_err(&spmi->dev, "sys file creation failed\n");
+		return rc;
+	}
+
 	/* Register the sysfs nodes */
 	if ((rc = sysfs_create_group(&spmi->dev.kobj,
 				&qpnp_attrs_group))) {
@@ -1577,6 +1783,8 @@ static int __devinit qpnp_pon_probe(struct spmi_device *spmi)
 static int qpnp_pon_remove(struct spmi_device *spmi)
 {
 	struct qpnp_pon *pon = dev_get_drvdata(&spmi->dev);
+
+	device_remove_file(&spmi->dev, &dev_attr_debounce_us);
 
 	cancel_delayed_work_sync(&pon->bark_work);
 	cancel_delayed_work_sync(&pon->kpdpwr_bark_work);
@@ -1598,7 +1806,7 @@ static struct spmi_driver qpnp_pon_driver = {
 		.of_match_table = spmi_match_table,
 	},
 	.probe		= qpnp_pon_probe,
-	.remove		= __devexit_p(qpnp_pon_remove),
+	.remove		= qpnp_pon_remove,
 };
 
 static int __init qpnp_pon_init(void)

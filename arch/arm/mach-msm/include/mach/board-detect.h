@@ -14,6 +14,7 @@
 #define __ARCH_ARM_MACH_MSM_BOARD_DETECT_H
 
 #include <asm/system_info.h>
+#include <mach/socinfo.h>
 
 // Devicetree defines
 #ifdef CONFIG_OF

@@ -31,6 +31,7 @@
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 #include <linux/metricslog.h>
 #endif
+#include <linux/regulator/consumer.h>
 
 /*
  * This driver handles the LM75 and compatible digital temperature sensors.
@@ -103,7 +104,8 @@ static ssize_t show_temp(struct device *dev, struct device_attribute *da,
 		return PTR_ERR(data);
 
 	if (data->byte_access) {
-		return sprintf(buf, "%d\n", data->temp[attr->index] * 1000);
+		return snprintf(buf, 20, "%d\n",
+			((s8) data->temp[attr->index]) * 1000);
 	} else {
 		return sprintf(buf, "%d\n",
 		       LM75_TEMP_FROM_REG(data->temp[attr->index]));
@@ -159,8 +161,9 @@ lm75_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	struct lm75_data *data;
 	int status;
 	u8 set_mask, clr_mask;
-	int new;
+	int new, rc;
 	const char *type;
+	struct regulator *vplus_regulator;
 
 	if (!i2c_check_functionality(client->adapter,
 			I2C_FUNC_SMBUS_BYTE_DATA | I2C_FUNC_SMBUS_WORD_DATA))
@@ -172,6 +175,31 @@ lm75_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	i2c_set_clientdata(client, data);
 	mutex_init(&data->update_lock);
+
+    vplus_regulator = regulator_get(&client->dev, "vplus");
+    if (IS_ERR(vplus_regulator )) {
+        rc = PTR_ERR(vplus_regulator);
+        dev_err(&client->dev,
+                "%s: Failed to get regulator vplus, %d\n",
+                __func__, rc);
+        goto exit_free;
+    }
+
+    rc = regulator_set_voltage(vplus_regulator, 1800000, 1800000);
+    if (rc) {
+        dev_err(&client->dev,
+                "%s: regulator_set_voltage failed on vplus, %d\n",
+                    __func__, rc);
+        goto exit_regulator;
+    }
+
+    rc = regulator_enable(vplus_regulator);
+    if (rc) {
+        dev_err(&client->dev,
+                "%s: regulator_enable failed on vplus, %d\n",
+                    __func__, rc);
+        goto exit_regulator;
+    }
 
 	/* Set to LM75 resolution (9 bits, 1/2 degree C) and range.
 	 * Then tweak to be more precise when appropriate.
@@ -225,6 +253,9 @@ lm75_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 exit_remove:
 	sysfs_remove_group(&client->dev.kobj, &lm75_group);
+exit_regulator:
+    regulator_disable(vplus_regulator);
+    regulator_put(vplus_regulator);  
 exit_free:
 	kfree(data);
 	return status;
@@ -354,12 +385,10 @@ static int lm75_detect(struct i2c_client *new_client,
 #ifdef CONFIG_PM
 static int lm75_suspend(struct device *dev)
 {
+	struct i2c_client *client = to_i2c_client(dev);
 	int status;
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 	int status1;
-#endif
-	struct i2c_client *client = to_i2c_client(dev);
-#if defined(CONFIG_AMAZON_METRICS_LOG)
 	char thermlog_buf[256];
 	char *thermsen_metrics = "thermsensor:def:pcbmonitor=1;CT;1";
 
@@ -386,11 +415,9 @@ static int lm75_suspend(struct device *dev)
 static int lm75_resume(struct device *dev)
 {
 	int status;
-#if defined(CONFIG_AMAZON_METRICS_LOG)
-	int status1;
-#endif
 	struct i2c_client *client = to_i2c_client(dev);
 #if defined(CONFIG_AMAZON_METRICS_LOG)
+	int status1;
 	char thermlog_buf[256];
 	char *thermsen_metrics = "thermsensor:def:pcbmonitor=1;CT;1";
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -89,47 +89,41 @@ static struct msm_sensor_power_setting imx135_power_setting[] = {
 static struct msm_sensor_power_setting imx135_power_setting[] = {
 	{
 		.seq_type = SENSOR_VREG,
-		.seq_val = 0,
+		.seq_val = CAM_VDIG,
 		.config_val = 0,
 		.delay = 0,
 	},
-/*	{
+	{
 		.seq_type = SENSOR_VREG,
 		.seq_val = CAM_VANA,
 		.config_val = 0,
 		.delay = 0,
-	},*/
+	},
 	{
 		.seq_type = SENSOR_VREG,
-		.seq_val = 1,
+		.seq_val = CAM_VIO,
 		.config_val = 0,
-		.delay = 1,
+		.delay = 0,
 	},
 	{
-		.seq_type = SENSOR_CLK,
-		.seq_val = SENSOR_CAM_MCLK,
-		.config_val = 24000000,
-		.delay = 1,
-	},
-/*	{
 		.seq_type = SENSOR_VREG,
 		.seq_val = CAM_VAF,
 		.config_val = 0,
 		.delay = 0,
-	},*/
+	},
 	{
 		.seq_type = SENSOR_GPIO,
 		.seq_val = SENSOR_GPIO_RESET,
 		.config_val = GPIO_OUT_LOW,
-		.delay = 0,
+		.delay = 1,
 	},
 	{
 		.seq_type = SENSOR_GPIO,
 		.seq_val = SENSOR_GPIO_RESET,
 		.config_val = GPIO_OUT_HIGH,
-		.delay = 1,
+		.delay = 30,
 	},
-/*	{
+	{
 		.seq_type = SENSOR_GPIO,
 		.seq_val = SENSOR_GPIO_STANDBY,
 		.config_val = GPIO_OUT_LOW,
@@ -140,11 +134,11 @@ static struct msm_sensor_power_setting imx135_power_setting[] = {
 		.seq_val = SENSOR_GPIO_STANDBY,
 		.config_val = GPIO_OUT_HIGH,
 		.delay = 30,
-	},*/
+	},
 	{
-		.seq_type = SENSOR_CLK2,
+		.seq_type = SENSOR_CLK,
 		.seq_val = SENSOR_CAM_MCLK,
-		.config_val = 12000000,
+		.config_val = 24000000,
 		.delay = 1,
 	},
 	{
@@ -208,7 +202,12 @@ static int32_t imx135_platform_probe(struct platform_device *pdev)
 	int32_t rc = 0;
 	const struct of_device_id *match;
 	match = of_match_device(imx135_dt_match, &pdev->dev);
-	rc = msm_sensor_platform_probe(pdev, match->data);
+	if (match)
+		rc = msm_sensor_platform_probe(pdev, match->data);
+	else {
+		pr_err("%s:%d match is null\n", __func__, __LINE__);
+		rc = -EINVAL;
+	}
 	return rc;
 }
 

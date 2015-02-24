@@ -18,6 +18,7 @@
 #include <linux/sched.h>
 #include <linux/clk.h>
 #include <linux/err.h>
+#include <linux/of.h>
 #include <linux/regulator/consumer.h>
 #include <linux/dma-mapping.h>
 
@@ -46,8 +47,6 @@
 #define RMB_PMI_META_DATA		0x10
 #define RMB_PMI_CODE_START		0x14
 #define RMB_PMI_CODE_LENGTH		0x18
-
-#define MAX_VDD_MX_UV			1150000
 
 #define POLL_INTERVAL_US		50
 
@@ -139,16 +138,6 @@ static void pil_msa_pbl_disable_clks(struct q6v5_data *drv)
 	clk_disable_unprepare(drv->ahb_clk);
 }
 
-/**********DEBUG CODE PART 1 START************/
-#define RMB_MBA_IMAGE       0x00
-#define RMB_PBL_STATUS      0x04
-#define RMB_MBA_COMMAND     0x08
-#define RMB_MBA_STATUS      0x0C
-#define RMB_PMI_META_DATA   0x10
-#define RMB_PMI_CODE_START  0x14
-#define RMB_PMI_CODE_LENGTH 0x18
-/**********DEBUG CODE PART 1 End************/
-
 static int pil_msa_wait_for_mba_ready(struct q6v5_data *drv)
 {
 	struct device *dev = drv->desc.dev;
@@ -167,11 +156,6 @@ static int pil_msa_wait_for_mba_ready(struct q6v5_data *drv)
 		return -EINVAL;
 	}
 
-	/**********DEBUG CODE PART 2 START************/
-	dev_err(dev, "PBL finished successfully with status %d\n", status);
-	/**********DEBUG CODE PART 2 END************/
-
-
 	/* Wait for MBA completion. */
 	ret = readl_poll_timeout(drv->rmb_base + RMB_MBA_STATUS, status,
 		status != 0, POLL_INTERVAL_US, pbl_mba_boot_timeout_ms * 1000);
@@ -182,45 +166,8 @@ static int pil_msa_wait_for_mba_ready(struct q6v5_data *drv)
 	if (status != STATUS_XPU_UNLOCKED &&
 	    status != STATUS_XPU_UNLOCKED_SCRIBBLED) {
 		dev_err(dev, "MBA returned unexpected status %d\n", status);
-
-		/**********DEBUG CODE PART 3 START************/
-		readl_poll_timeout(drv->rmb_base + RMB_PMI_CODE_LENGTH, status,
-			status != 0, POLL_INTERVAL_US,
-			pbl_mba_boot_timeout_ms * 1000);
-
-		dev_err(dev, "MBA authenticated bytes so far: %x\n", status);
-
-		readl_poll_timeout(drv->rmb_base + RMB_MBA_IMAGE, status,
-			status != 0, POLL_INTERVAL_US,
-			pbl_mba_boot_timeout_ms * 1000);
-
-		dev_err(dev, "MBA start address: %x\n", status);
-
-		readl_poll_timeout(drv->rmb_base + RMB_PMI_CODE_START, status,
-			status != 0, POLL_INTERVAL_US,
-			pbl_mba_boot_timeout_ms * 1000);
-
-		dev_err(dev, "Modem start address: %x\n", status);
-
-		readl_poll_timeout(drv->rmb_base + RMB_MBA_COMMAND, status,
-			status != 0, POLL_INTERVAL_US,
-			pbl_mba_boot_timeout_ms * 1000);
-
-		dev_err(dev, "MBA current command: %x\n", status);
-
-		readl_poll_timeout(drv->rmb_base + RMB_PBL_STATUS, status,
-			status != 0, POLL_INTERVAL_US,
-			pbl_mba_boot_timeout_ms * 1000);
-
-		dev_err(dev, "PBL status: %d\n", status);
-		/**********DEBUG CODE PART 3 END ************/
-
 		return -EINVAL;
 	}
-
-	/**********DEBUG CODE PART 4 START************/
-	dev_err(dev, "MBA finished successfully with status %d\n", status);
-	/**********DEBUG CODE PART 4 END************/
 
 	return 0;
 }
@@ -229,11 +176,17 @@ static int pil_msa_pbl_shutdown(struct pil_desc *pil)
 {
 	struct q6v5_data *drv = container_of(pil, struct q6v5_data, desc);
 
-	pil_q6v5_halt_axi_port(pil, drv->axi_halt_base + MSS_Q6_HALT_BASE);
-	pil_q6v5_halt_axi_port(pil, drv->axi_halt_base + MSS_MODEM_HALT_BASE);
-	pil_q6v5_halt_axi_port(pil, drv->axi_halt_base + MSS_NC_HALT_BASE);
+	if (drv->axi_halt_base) {
+		pil_q6v5_halt_axi_port(pil,
+			drv->axi_halt_base + MSS_Q6_HALT_BASE);
+		pil_q6v5_halt_axi_port(pil,
+			drv->axi_halt_base + MSS_MODEM_HALT_BASE);
+		pil_q6v5_halt_axi_port(pil,
+			drv->axi_halt_base + MSS_NC_HALT_BASE);
+	}
 
-	writel_relaxed(1, drv->restart_reg);
+	if (drv->restart_reg)
+		writel_relaxed(1, drv->restart_reg);
 
 	if (drv->is_booted) {
 		pil_msa_pbl_disable_clks(drv);
@@ -259,9 +212,11 @@ static int pil_msa_pbl_reset(struct pil_desc *pil)
 		goto err_power;
 
 	/* Deassert reset to subsystem and wait for propagation */
-	writel_relaxed(0, drv->restart_reg);
-	mb();
-	udelay(2);
+	if (drv->restart_reg) {
+		writel_relaxed(0, drv->restart_reg);
+		mb();
+		udelay(2);
+	}
 
 	ret = pil_msa_pbl_enable_clks(drv);
 	if (ret)
@@ -295,7 +250,8 @@ static int pil_msa_pbl_reset(struct pil_desc *pil)
 err_q6v5_reset:
 	pil_msa_pbl_disable_clks(drv);
 err_clks:
-	writel_relaxed(1, drv->restart_reg);
+	if (drv->restart_reg)
+		writel_relaxed(1, drv->restart_reg);
 	pil_msa_pbl_power_down(drv);
 err_power:
 	return ret;
@@ -305,8 +261,15 @@ static int pil_msa_pbl_make_proxy_votes(struct pil_desc *pil)
 {
 	int ret;
 	struct q6v5_data *drv = container_of(pil, struct q6v5_data, desc);
+	int uv = 0;
 
-	ret = regulator_set_voltage(drv->vreg_mx, VDD_MSS_UV, MAX_VDD_MX_UV);
+	ret = of_property_read_u32(pil->dev->of_node, "vdd_mx-uV", &uv);
+	if (ret) {
+		dev_err(pil->dev, "missing vdd_mx-uV property\n");
+		return ret;
+	}
+
+	ret = regulator_set_voltage(drv->vreg_mx, uv, INT_MAX);
 	if (ret) {
 		dev_err(pil->dev, "Failed to request vreg_mx voltage\n");
 		return ret;
@@ -315,14 +278,14 @@ static int pil_msa_pbl_make_proxy_votes(struct pil_desc *pil)
 	ret = regulator_enable(drv->vreg_mx);
 	if (ret) {
 		dev_err(pil->dev, "Failed to enable vreg_mx\n");
-		regulator_set_voltage(drv->vreg_mx, 0, MAX_VDD_MX_UV);
+		regulator_set_voltage(drv->vreg_mx, 0, INT_MAX);
 		return ret;
 	}
 
 	ret = pil_q6v5_make_proxy_votes(pil);
 	if (ret) {
 		regulator_disable(drv->vreg_mx);
-		regulator_set_voltage(drv->vreg_mx, 0, MAX_VDD_MX_UV);
+		regulator_set_voltage(drv->vreg_mx, 0, INT_MAX);
 	}
 
 	return ret;
@@ -333,7 +296,7 @@ static void pil_msa_pbl_remove_proxy_votes(struct pil_desc *pil)
 	struct q6v5_data *drv = container_of(pil, struct q6v5_data, desc);
 	pil_q6v5_remove_proxy_votes(pil);
 	regulator_disable(drv->vreg_mx);
-	regulator_set_voltage(drv->vreg_mx, 0, MAX_VDD_MX_UV);
+	regulator_set_voltage(drv->vreg_mx, 0, INT_MAX);
 }
 
 struct pil_reset_ops pil_msa_pbl_ops = {

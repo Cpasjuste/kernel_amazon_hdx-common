@@ -143,8 +143,10 @@ struct lp855x_platform_data {
 	int size_program;
 	struct lp855x_rom_data *rom_data;
 	int cont_splash_enabled;
+	int pwm_period;
+	int pwm_lpg_chan;
 };
 
 void lp855x_bl_set(int val);
-
+void lp855x_bl_mode_switch( int pwm);
 #endif

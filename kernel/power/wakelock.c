@@ -9,6 +9,7 @@
  * manipulate wakelocks on Android.
  */
 
+#include <linux/capability.h>
 #include <linux/ctype.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -16,7 +17,6 @@
 #include <linux/list.h>
 #include <linux/rbtree.h>
 #include <linux/slab.h>
-#include <linux/module.h>
 
 static DEFINE_MUTEX(wakelocks_lock);
 
@@ -189,6 +189,9 @@ int pm_wake_lock(const char *buf)
 	size_t len;
 	int ret = 0;
 
+	if (!capable(CAP_BLOCK_SUSPEND))
+		return -EPERM;
+
 	while (*str && !isspace(*str))
 		str++;
 
@@ -232,6 +235,9 @@ int pm_wake_unlock(const char *buf)
 	size_t len;
 	int ret = 0;
 
+	if (!capable(CAP_BLOCK_SUSPEND))
+		return -EPERM;
+
 	len = strlen(buf);
 	if (!len)
 		return -EINVAL;
@@ -258,35 +264,3 @@ int pm_wake_unlock(const char *buf)
 	mutex_unlock(&wakelocks_lock);
 	return ret;
 }
-
-#ifdef CONFIG_PM_WAKELOCKS_ACTIVE_CHECK
-/* Internal kernel API to check if a particular userspace
- * wakelock is active
- */
-int pm_wakelock_is_active(const char *name)
-{
-	struct wakelock *wl;
-	size_t len;
-	int ret;
-
-	len = strlen(name);
-	if (!len) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	/* We are not taking the mutex.
-	 * it's ok race since we don't want to sleep...
-	 */
-	wl = wakelock_lookup_add(name, len, false);
-	if (IS_ERR(wl)) {
-		ret = PTR_ERR(wl);
-		goto out;
-	}
-
-	ret = (int)wl->ws.active;
-out:
-	return ret;
-}
-EXPORT_SYMBOL(pm_wakelock_is_active);
-#endif /* CONFIG_PM_WAKELOCKS_ACTIVE_CHECK */

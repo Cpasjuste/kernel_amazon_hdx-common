@@ -25,7 +25,9 @@
 #include <linux/input.h>
 #include <linux/gpio.h>
 #include <linux/of_gpio.h>
+#ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
+#endif
 #include <linux/regulator/consumer.h>
 #include <linux/input/b_synaptics_dsx.h>
 #include "b_synaptics_dsx_i2c.h"
@@ -2325,7 +2327,7 @@ static void synaptics_rmi4_set_params(struct synaptics_rmi4_data *rmi4_data)
 
 #ifdef TYPE_B_PROTOCOL
 	input_mt_init_slots(rmi4_data->input_dev,
-			rmi4_data->num_of_fingers);
+			rmi4_data->num_of_fingers, INPUT_MT_DIRECT);
 #endif
 
 	f1a = NULL;
@@ -2675,7 +2677,7 @@ static int synaptics_rmi4_parse_dt(struct device *dev, struct synaptics_dsx_plat
  * and creates a work queue for detection of other expansion Function
  * modules.
  */
-static int __devinit synaptics_rmi4_probe(struct i2c_client *client,
+static int synaptics_rmi4_probe(struct i2c_client *client,
 		const struct i2c_device_id *dev_id)
 {
 	int retval;
@@ -2740,7 +2742,7 @@ static int __devinit synaptics_rmi4_probe(struct i2c_client *client,
 			retval = PTR_ERR(rmi4_data->regulator);
 			goto err_regulator;
 		}
-		regulator_enable(rmi4_data->regulator);
+		retval = regulator_enable(rmi4_data->regulator);
 		msleep(platform_data->reset_delay_ms);
 	}
 
@@ -2889,7 +2891,7 @@ err_platform_data:
  * frees the interrupt, unregisters the driver from the input subsystem,
  * turns off the power to the sensor, and frees other allocated resources.
  */
-static int __devexit synaptics_rmi4_remove(struct i2c_client *client)
+static int synaptics_rmi4_remove(struct i2c_client *client)
 {
 	unsigned char attr_count;
 	struct synaptics_rmi4_data *rmi4_data = i2c_get_clientdata(client);
@@ -3152,7 +3154,7 @@ int synaptics_rmi4_resume(void* dev_context)
 		return 0;
 
 	if (platform_data->regulator_en) {
-		regulator_enable(rmi4_data->regulator);
+		retval = regulator_enable(rmi4_data->regulator);
 		msleep(platform_data->reset_delay_ms);
 		rmi4_data->current_page = MASK_8BIT;
 	}
@@ -3191,7 +3193,7 @@ static struct i2c_driver synaptics_rmi4_driver = {
 		.of_match_table = synaptics_match_table,
 	},
 	.probe = synaptics_rmi4_probe,
-	.remove = __devexit_p(synaptics_rmi4_remove),
+	.remove = synaptics_rmi4_remove,
 	.id_table = synaptics_rmi4_id_table,
 };
 

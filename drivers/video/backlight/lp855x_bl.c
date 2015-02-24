@@ -19,6 +19,7 @@
 
 #include <linux/of_gpio.h>
 #include <linux/regulator/consumer.h>
+#include <linux/qpnp/pwm.h>
 
 /* LP8550/1/2/3/6 Registers */
 #define LP855X_BRIGHTNESS_CTRL		0x00
@@ -52,6 +53,7 @@ static void* touch_dev_context = NULL;
 struct lp855x;
 
 static int backlight_en;
+static int unset_pwm_mode;
 
 struct lp855x_device_config {
 	u8 reg_brightness;
@@ -137,6 +139,58 @@ static bool lp855x_is_valid_rom_area(struct lp855x *lp, u8 addr)
 	return (addr >= start && addr <= end);
 }
 
+static int lp855x_bl_update_pwm(struct lp855x *lp, int val)
+{
+	int ret;
+	u32 duty;
+
+	if (lp == NULL) return 1;
+
+	if (lp->pwm == NULL) {
+		lp->pwm = pwm_request(lp->pdata->pwm_lpg_chan, "lcd-bklt");
+		if(lp->pwm == NULL || IS_ERR(lp->pwm)){
+			dev_err(lp->dev, "%s: Error: lpg_chan=%d pwm request failed",
+					__func__, lp->pdata->pwm_lpg_chan);
+			return 1;
+		}
+	}
+
+	pwm_disable(lp->pwm);
+
+	duty = val * lp->pdata->pwm_period;
+	duty /= MAX_BRIGHTNESS;
+
+	ret = pwm_config_us(lp->pwm, duty, lp->pdata->pwm_period);
+	if (ret) {
+		dev_err(lp->dev, "%s: pwm_config_us() failed err=%d.\n", __func__, ret);
+		return ret;
+	}
+
+	if (val){
+		ret = pwm_enable(lp->pwm);
+		if (ret){
+			dev_err(lp->dev, "%s: pwm_enable() failed err=%d\n", __func__, ret);
+			return ret;
+		}
+	}
+	else
+		pwm_disable(lp->pwm);
+
+	dev_dbg(lp->dev, "%s:level=%d duty=%d\n", __func__,val, duty );
+
+	return 0;
+}
+
+static int lp855x_bl_update_register(struct lp855x *lp, int val)
+{
+	if (lp == NULL) return 1;
+
+	lp855x_write_byte(lp, lp->cfg->reg_brightness, val);
+	dev_dbg(lp->dev, "%s set brightness to %d\n", __func__, val);
+
+	return 0;
+}
+
 static int lp855x_init_device(struct lp855x *lp)
 {
 	struct lp855x_platform_data *pd = lp->pdata;
@@ -185,14 +239,20 @@ int lcd_panel_enabled = 1; /* first power on do not need to wait */
 static int lp8557_bl_on(struct lp855x *lp)
 {
 	long timeWaited=0;
+	struct timeval  tv1, tv2;
 
 	dev_info(lp->dev, "bl_ON\n");
  
+	do_gettimeofday(&tv1);
 	if (!lcd_panel_enabled) {		
 		/* wait until LCD panel is ready or end of timeout */
 		timeWaited = wait_event_timeout(panel_on_waitqueue, lcd_panel_enabled, msecs_to_jiffies(1000));
 	}
-	dev_info(lp->dev, "timeWaited: %ld\n", timeWaited);
+	do_gettimeofday(&tv2);
+	dev_info(lp->dev, "time usec %ld -> %ld, diff %ld, timeWaited=%ld\n", 
+		 tv1.tv_usec, tv2.tv_usec, tv2.tv_usec - tv1.tv_usec, timeWaited);
+
+	lcd_panel_enabled = 0;
 
 	/* turn on lp855x power and init */
 	gpio_set_value(lp->pdata->gpio_enable, 1);
@@ -250,6 +310,12 @@ static int lp855x_configure(struct lp855x *lp)
 			dev_err(lp->dev, "%s read from chip failed\n", __func__);
 			lp->last_brightness = 0;
 		}
+
+		//TODO:This will be make the blink during boot, should fix later.
+		/*In the PWM mode, the pmic gpio is pull down during boot up now, so pull up here.*/
+		if((lp->pdata->device_control&0x3) != LP8557_I2C_ONLY && lp->pdata->mode != PWM_BASED){
+			lp855x_bl_update_pwm(lp, MAX_BRIGHTNESS);
+		}
 	}
 
 	return ret;
@@ -294,34 +360,69 @@ int lp855x_bl_rm_touch_pm_calls(void)
 }
 EXPORT_SYMBOL(lp855x_bl_rm_touch_pm_calls);
 
-static void lp855x_bl_update_register(struct lp855x *lp, int val)
+
+void lp855x_bl_mode_switch( int pwm)
 {
-	if (lp == NULL) return;
+	dev_err(lp855x_ctx->dev, "%s: mode=%d\n", __func__,pwm);
+	if (lp855x_ctx) {
+		mutex_lock(&lp855x_ctx->bl_lock);
 
-	if ((lp->last_brightness == 0) && (val != 0)) {
-		lp8557_bl_on(lp);
-		if (touch_resume)
-			touch_resume(touch_dev_context);
-	}
-	if ((lp->last_brightness != 0) && (val == 0)) {
-		if (touch_suspend)
-			touch_suspend(touch_dev_context);
-		lp8557_bl_off(lp);
-	}
+		if(pwm == PWM_BASED)
+		{
+			if(gpio_get_value(lp855x_ctx->pdata->gpio_enable)){
+				lp855x_bl_update_pwm(lp855x_ctx, lp855x_ctx->last_brightness);
+				lp855x_ctx->pdata->mode = PWM_BASED;
+			} else{
+				unset_pwm_mode = 1;
+				dev_err(lp855x_ctx->dev, "%s: unset_pwm_mode=%d\n", __func__,unset_pwm_mode);
+			}
+		} else {
+			lp855x_bl_update_pwm(lp855x_ctx, MAX_BRIGHTNESS);
+			lp855x_ctx->pdata->mode = REGISTER_BASED;
+			unset_pwm_mode = 0;
+		}
 
-	if (val != lp->last_brightness) {
-		lp855x_write_byte(lp, lp->cfg->reg_brightness, val);
-		lp->last_brightness = val;
-		dev_dbg(lp->dev, "%s set brightness to %d\n", __func__, val);
+		mutex_unlock(&lp855x_ctx->bl_lock);
 	}
 }
+EXPORT_SYMBOL(lp855x_bl_mode_switch);
 
 void lp855x_bl_set(int val)
 {
+	int ret = 0;
+
 	if (lp855x_ctx) {
 		mutex_lock(&lp855x_ctx->bl_lock); /* lock it in this function instead of update_register */
-		lp855x_bl_update_register(lp855x_ctx, val);
+
+		if ((lp855x_ctx->last_brightness == 0) && (val != 0)) {
+			lp8557_bl_on(lp855x_ctx);
+			if (touch_resume)
+				touch_resume(touch_dev_context);
+		}
+		if ((lp855x_ctx->last_brightness != 0) && (val == 0)) {
+			if (touch_suspend)
+				touch_suspend(touch_dev_context);
+			lp8557_bl_off(lp855x_ctx);
+		}
+
+		if (val != lp855x_ctx->last_brightness) {
+			if(lp855x_ctx->pdata->mode == PWM_BASED){
+				//Use the pwm only in cabl mode.
+				ret = lp855x_bl_update_pwm(lp855x_ctx, val);
+			} else {
+				ret = lp855x_bl_update_register(lp855x_ctx, val);
+			}
+		}
+
+		if(!ret)
+			lp855x_ctx->last_brightness = val;
+
 		mutex_unlock(&lp855x_ctx->bl_lock);
+
+		if(!ret && (unset_pwm_mode == 1) && (gpio_get_value(lp855x_ctx->pdata->gpio_enable))){
+			lp855x_bl_mode_switch(PWM_BASED);
+			unset_pwm_mode = 0;
+		}
 	}
 }
 EXPORT_SYMBOL(lp855x_bl_set);
@@ -332,7 +433,7 @@ static int lp855x_bl_update_status(struct backlight_device *bl)
 
 	/* Move backlight setting to /sys/class/leds/lcd-backlight/brightness
 	   This is because ALS is handled there (scaled backlight) */
-	dev_err(lp->dev, "%s: backlight should be set through leds interface\n", __func__);
+	dev_dbg(lp->dev, "%s: backlight should be set through leds interface\n", __func__);
 #if 0
 	enum lp855x_brightness_ctrl_mode mode = lp->pdata->mode;
 
@@ -503,8 +604,29 @@ static int lp855x_parse_dt(struct device *dev, struct lp855x_platform_data *pdat
 		return -EINVAL;
 	}	
 	pdata->mode = tmp;
-	
+
 	tmp = 0;
+	if((pdata->device_control&0x3) != LP8557_I2C_ONLY){
+		rc = of_property_read_u32(np, "ti,lp855x-pmic-pwm-frequency", &tmp);
+		if (rc) {
+			dev_err(dev, "%s:%d, pwm_period not specified\n",
+							__func__, __LINE__);
+			return -EINVAL;
+		}
+		pdata->pwm_period = tmp;
+
+		rc = of_property_read_u32(np, "ti,lp855x-pmic-bank-select", &tmp);
+		if (rc) {
+			dev_err(dev, "%s:%d, pwm_lpg_chan not specified\n",
+							__func__, __LINE__);
+			return -EINVAL;
+		}
+		pdata->pwm_lpg_chan = tmp;
+
+		dev_info(dev, "%s:%d,pwm_period=%d, pwm_lpg_chan=%d\n",
+							__func__, __LINE__,pdata->pwm_period,pdata->pwm_lpg_chan);
+	}
+
 	rc = of_property_read_u32(np, "ti,lp855x-cont-splash-enabled", &tmp);
 	pdata->cont_splash_enabled = tmp;
 
@@ -645,9 +767,9 @@ static int lp855x_probe(struct i2c_client *cl, const struct i2c_device_id *id)
 
 	lp855x_ctx = lp;
 /* This is a hack to update initial brightness, will remove after Android setting is right */
-#if defined(CONFIG_ARCH_APQ8084_LOKI)
-	lp855x_bl_update_register(lp, pdata->initial_brightness);
-#endif	
+#if defined(CONFIG_ARCH_APQ8084_MOCHA_COMMON)
+	lp855x_bl_set(pdata->initial_brightness);
+#endif
 	return 0;
 
 err_sysfs:

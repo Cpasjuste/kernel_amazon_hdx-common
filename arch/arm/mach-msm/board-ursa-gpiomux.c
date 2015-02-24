@@ -416,7 +416,6 @@ static struct msm_gpiomux_config ursa_camera_configs_pre_dvt[] __initdata = {
 			[GPIOMUX_SUSPENDED] = &func1_pd_2ma_cfg,
 		},
 	},
-
 };
 
 static struct msm_gpiomux_config ursa_camera_configs_dvt[] __initdata = {
@@ -615,7 +614,7 @@ static struct msm_gpiomux_config ursa_system_configs_p2[] __initdata = {
 		.gpio     = 92,		/* DEVICE_PRODUCTION */
 		.settings = {
 			[GPIOMUX_ACTIVE]    = &gpio_pd_2ma_cfg,
-			[GPIOMUX_SUSPENDED] = &gpio_pu_2ma_cfg,
+			[GPIOMUX_SUSPENDED] = &gpio_pn_2ma_cfg,
 		},
 	},
 };
@@ -757,7 +756,7 @@ void __init ursa_init_gpiomux(void)
 		/* before pre DVT */
 		msm_gpiomux_install(ursa_camera_configs_p1p2evt_common, ARRAY_SIZE(ursa_camera_configs_p1p2evt_common));
 	}
-	else if ((ursa_board_revision() == URSA_REVISION_PRE_DVT) )
+	else if (ursa_board_revision() == URSA_REVISION_PRE_DVT)
 	{
 		/* shared with P1 family */
 		msm_gpiomux_install(ursa_audio_configs_p1, ARRAY_SIZE(ursa_audio_configs_p1));
@@ -771,7 +770,7 @@ void __init ursa_init_gpiomux(void)
 		/* pre DVT */
 		msm_gpiomux_install(ursa_camera_configs_pre_dvt, ARRAY_SIZE(ursa_camera_configs_pre_dvt));
 	}
-	else if ((ursa_board_revision() == URSA_REVISION_DVT))
+	else if (ursa_board_revision() == URSA_REVISION_DVT)
 	{
 		/* shared with P1 family */
 		msm_gpiomux_install(ursa_audio_configs_p1, ARRAY_SIZE(ursa_audio_configs_p1));
@@ -790,7 +789,6 @@ void __init ursa_init_gpiomux(void)
 		pr_crit("%s - Invalid board revision\n", __func__);
 		panic("ursa-gpiomux: Invalid board revision");
 	}
-
 	// Switch camera MCLK source to alternate clocks
 	if (socinfo_get_version() >= 0x20000) {
 		msm_tlmm_misc_reg_write(TLMM_SPARE_REG, 0x5);

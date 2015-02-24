@@ -1,0 +1,6 @@
+config SLIMPORT_ANX3618
+	tristate  "Analogix slimport driver support"
+	default n
+	help
+	  Slimport Transmitter is a HD video transmitter chip
+	  over micro-USB connector for smartphone device.

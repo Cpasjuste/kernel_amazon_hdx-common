@@ -26,7 +26,9 @@
 #include <linux/gpio.h>
 #include <linux/uaccess.h>
 #include <linux/cdev.h>
+#ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
+#endif
 #include <linux/input/b_synaptics_dsx.h>
 #include "b_synaptics_dsx_i2c.h"
 

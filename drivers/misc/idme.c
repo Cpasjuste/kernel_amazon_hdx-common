@@ -24,7 +24,9 @@
 
 #define PRODUCT_FEATURE_STRING_GPS " "
 #define PRODUCT_FEATURE_STRING_WAN " "
-
+#define PRODUCT_BOARD_ID_LEN 16
+#define PRODUCT_BOARD_WAN_BYTE_INDEX 9
+#define PRODUCT_BOARD_WAN_BYTE_VALUE '1'
 
 static int idme_proc_show(struct seq_file *seq, void *v)
 {
@@ -39,7 +41,7 @@ static int idme_proc_show(struct seq_file *seq, void *v)
 
 static int idme_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, idme_proc_show, PDE(inode)->data);
+	return single_open(file, idme_proc_show, PDE_DATA(inode));
 }
 
 static const struct file_operations idme_fops = {
@@ -50,18 +52,6 @@ static const struct file_operations idme_fops = {
 	.release	= single_release,
 };
 
-static int proc_pfeature_wan_name_func(char *buffer, char **start, off_t off,
-                                int count, int *eof, void *data)
-{
-        char str[] = PRODUCT_FEATURE_STRING_WAN;
-        if (strlen(str) < PAGE_SIZE){
-                memcpy(buffer, str, strlen(str));
-                *eof = 1;
-                return strlen(str);
-        }
-        return 0;
-}
-
 bool board_has_wan(void)
 {
        struct device_node *ap;
@@ -70,14 +60,37 @@ bool board_has_wan(void)
        ap = of_find_node_by_path("/idme/board_id");
        if (ap) {
                const char *boardid = of_get_property(ap, "value", &len);
-               if (len >= 2) {
-                       if (boardid[0] == '0' && boardid[5] == '1')
+               if (len >= PRODUCT_BOARD_ID_LEN) {
+                       if (boardid[PRODUCT_BOARD_WAN_BYTE_INDEX] == PRODUCT_BOARD_WAN_BYTE_VALUE)
                                return true;
                }
        }
-
        return false;
 }
+
+static int pfeature_wan_proc_show(struct seq_file *seq, void *v)
+{
+	struct property *pp = (struct property *)seq->private;
+
+	BUG_ON(!pp);
+
+	seq_write(seq, pp->value, pp->length);
+
+	return 0;
+}
+
+static int pfeature_wan_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, pfeature_wan_proc_show, PDE_DATA(inode));
+}
+
+static const struct file_operations pfeature_wan_fops = {
+	.owner		= THIS_MODULE,
+	.open		= pfeature_wan_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 static int __init idme_init(void)
 {
@@ -85,7 +98,8 @@ static int __init idme_init(void)
 	struct device_node *root = NULL, *child = NULL;
 	struct property *pp_value = NULL;
 	int perm = 0;
-	static struct proc_dir_entry *proc_product_features_dir;
+	static struct proc_dir_entry *proc_product_features_dir = NULL;
+	char *msg;
 	struct proc_dir_entry *child_pde = NULL;
 	bool access_restrict = false;
 
@@ -125,28 +139,31 @@ static int __init idme_init(void)
 			&idme_fops, pp_value);
 
 		if (child_pde && access_restrict)
-			child_pde->uid = MAC_SEC_OWNER;
+			proc_set_user(child_pde, MAC_SEC_OWNER, MAC_SEC_OWNER);
 	}
 
 	of_node_put(child);
 	of_node_put(root);
 
-        proc_product_features_dir = proc_mkdir("product_features", NULL);
-        if (proc_product_features_dir) {
-                if (board_has_wan()) {
-                        struct proc_dir_entry *proc_wan_name =
-                                create_proc_entry(PRODUCT_FEATURE_NAME_WAN,
-                                                S_IRUGO,
-                                                proc_product_features_dir);
-                        if (proc_wan_name != NULL) {
-                                proc_wan_name->data = NULL;
-                                proc_wan_name->read_proc =
-                                        proc_pfeature_wan_name_func;
-                                proc_wan_name->write_proc = NULL;
-                        }
-                }
-        }
+	proc_product_features_dir = proc_mkdir("product_features", NULL);
+	if (!proc_product_features_dir) {
+		return -ENOMEM;
+	}
 
+	if (board_has_wan()) {
+			struct proc_dir_entry *proc_wan_name;
+			msg = PRODUCT_FEATURE_STRING_WAN;
+			pp_value->value = (void *)msg;
+			proc_wan_name =
+				proc_create_data(PRODUCT_FEATURE_NAME_WAN,
+								S_IRUGO,
+								proc_product_features_dir,
+								&pfeature_wan_fops,
+								pp_value);
+		}
 	return 0;
 }
 fs_initcall(idme_init);
+
+EXPORT_SYMBOL(board_has_wan);
+

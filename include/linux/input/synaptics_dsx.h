@@ -5,6 +5,7 @@
  *
  * Copyright (C) 2012 Alexandra Chin <alexandra.chin@tw.synaptics.com>
  * Copyright (C) 2012 Scott Lin <scott.lin@tw.synaptics.com>
+ * Copyright (c) 2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@
 #ifndef _SYNAPTICS_DSX_H_
 #define _SYNAPTICS_DSX_H_
 
-#if !defined(CONFIG_ARCH_MSM8974_THOR) && !defined(CONFIG_ARCH_MSM8974_APOLLO) && !defined(CONFIG_ARCH_APQ8084_LOKI)
+#if !defined(CONFIG_ARCH_MSM8974_THOR) && !defined(CONFIG_ARCH_MSM8974_APOLLO) && !defined(CONFIG_ARCH_APQ8084_LOKI) && !defined(CONFIG_ARCH_APQ8084_SATURN)
 /*
  * struct synaptics_rmi4_capacitance_button_map - 0d button map
  * @nbuttons: number of buttons
@@ -81,7 +82,7 @@ struct synaptics_rmi4_platform_data {
 	struct synaptics_rmi4_capacitance_button_map *capacitance_button_map;
 };
 
-#else
+#elif defined(CONFIG_ARCH_MSM8974_THOR) || defined(CONFIG_ARCH_MSM8974_APOLLO)
 /*
  * struct synaptics_dsx_cap_button_map - 0d button map
  * @nbuttons: number of 0d buttons
@@ -107,15 +108,77 @@ struct synaptics_dsx_platform_data {
 	bool x_flip;
 	bool y_flip;
 	bool regulator_en;
+	bool i2c_pull_up;
 	unsigned irq_gpio;
-	unsigned irq_flags;
+	u32 irq_flags;
+	u32 reset_flags;
 	unsigned reset_gpio;
 	unsigned reset_gpio_flags;
 	bool use_id_gpio;
 	unsigned id0_gpio;
 	unsigned id1_gpio;
+	unsigned panel_x;
+	unsigned panel_y;
+	const char *fw_image_name;
 	int (*gpio_config)(unsigned gpio, bool configure);
 	struct synaptics_dsx_cap_button_map *cap_button_map;
 };
-#endif /* for apollo and thor */
+
+#elif defined(CONFIG_ARCH_APQ8084_LOKI) || defined(CONFIG_ARCH_APQ8084_SATURN)
+#define PLATFORM_DRIVER_NAME "synaptics_dsx"
+#define I2C_DRIVER_NAME "synaptics_dsx_i2c"
+#define SPI_DRIVER_NAME "synaptics_dsx_spi"
+/*
+ * struct synaptics_dsx_cap_button_map - 0d button map
+ * @nbuttons: number of 0d buttons
+ * @map: pointer to array of button types
+ */
+struct synaptics_dsx_cap_button_map {
+	unsigned char nbuttons;
+	unsigned char *map;
+};
+
+/*
+ * struct synaptics_dsx_platform_data - dsx platform data
+ * @x_flip: x flip flag
+ * @y_flip: y flip flag
+ * @regulator_en: regulator enable flag
+ * @irq_gpio: attention interrupt gpio
+ * @irq_flags: flags used by the irq
+ * @reset_gpio: reset gpio
+ * @gpio_config: pointer to gpio configuration function
+ * @cap_button_map: pointer to 0d button map
+ */
+struct synaptics_dsx_board_data {
+        bool x_flip;
+        bool y_flip;
+        bool swap_axes;
+        bool regulator_en;
+        bool i2c_pull_up;
+        unsigned irq_gpio;
+	 int irq_on_state;
+        int power_gpio;
+        int power_on_state;
+        u32 irq_flags;
+        u32 reset_flags;
+        unsigned reset_gpio;
+        unsigned reset_on_state;
+        unsigned reset_gpio_flags;
+        bool use_id_gpio;
+        int id0_gpio;
+        int id1_gpio;
+        unsigned panel_x;
+        unsigned panel_y;
+        unsigned int power_delay_ms;
+        unsigned int reset_delay_ms;
+        unsigned int reset_active_ms;
+        unsigned int byte_delay_us;
+        unsigned int block_delay_us;
+        unsigned char *regulator_name;
+        const char *fw_image_name;
+        int (*gpio_config)(int gpio, bool configure, int dir, int state);
+	struct synaptics_dsx_cap_button_map *cap_button_map;
+};
+#endif /* For apollo and thor Or loki and saturn */
+
 #endif

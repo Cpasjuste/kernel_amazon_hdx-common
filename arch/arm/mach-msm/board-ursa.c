@@ -22,68 +22,36 @@
 #include <linux/memory.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/krait-regulator.h>
+#include <linux/regulator/rpm-smd-regulator.h>
 #include <linux/msm_tsens.h>
 #include <linux/msm_thermal.h>
 #include <asm/mach/map.h>
-#include <asm/hardware/gic.h>
 #include <asm/mach/map.h>
 #include <asm/mach/arch.h>
-#include <asm/system_info.h>
 #include <mach/board.h>
 #include <mach/gpiomux.h>
 #include <mach/msm_iomap.h>
-#ifdef CONFIG_ION_MSM
-#include <mach/ion.h>
-#endif
 #include <mach/msm_memtypes.h>
 #include <mach/msm_smd.h>
 #include <mach/restart.h>
 #include <mach/rpm-smd.h>
-#include <mach/rpm-regulator-smd.h>
+#include <soc/qcom/smem.h>
 #include <mach/socinfo.h>
-#include <mach/msm_smem.h>
 #include "board-dt.h"
 #include "clock.h"
-#include "devices.h"
 #include "spm.h"
 #include "pm.h"
-#include "modem_notifier.h"
 #include "platsmp.h"
-
-void __init ursa_init_gpiomux(void);
-
-static struct memtype_reserve msm8974_reserve_table[] __initdata = {
-	[MEMTYPE_SMI] = {
-	},
-	[MEMTYPE_EBI0] = {
-		.flags	=	MEMTYPE_FLAGS_1M_ALIGN,
-	},
-	[MEMTYPE_EBI1] = {
-		.flags	=	MEMTYPE_FLAGS_1M_ALIGN,
-	},
-};
-
-static int msm8974_paddr_to_memtype(phys_addr_t paddr)
-{
-	return MEMTYPE_EBI1;
-}
-
-static struct reserve_info msm8974_reserve_info __initdata = {
-	.memtype_reserve_table = msm8974_reserve_table,
-	.paddr_to_memtype = msm8974_paddr_to_memtype,
-};
+#include "mach/board-detect.h"
 
 void __init ursa_reserve(void)
 {
-	reserve_info = &msm8974_reserve_info;
-	of_scan_flat_dt(dt_scan_for_memory_reserve, msm8974_reserve_table);
-	msm_reserve();
+        of_scan_flat_dt(dt_scan_for_memory_reserve, NULL);
 }
 
 static void __init msm8974_early_memory(void)
 {
-	reserve_info = &msm8974_reserve_info;
-	of_scan_flat_dt(dt_scan_for_memory_hole, msm8974_reserve_table);
+	of_scan_flat_dt(dt_scan_for_memory_hole, NULL);
 }
 
 /*
@@ -94,18 +62,12 @@ static void __init msm8974_early_memory(void)
  */
 void __init ursa_add_drivers(void)
 {
-	msm_smem_init();
-	msm_init_modem_notifier_list();
 	msm_smd_init();
 	msm_rpm_driver_init();
 	msm_pm_sleep_status_init();
-	rpm_regulator_smd_driver_init();
+	rpm_smd_regulator_driver_init();
 	msm_spm_device_init();
 	krait_power_init();
-	if (of_board_is_rumi())
-		msm_clock_init(&msm8974_rumi_clock_init_data);
-	else
-		msm_clock_init(&msm8974_clock_init_data);
 	tsens_tm_init_driver();
 	msm_thermal_device_init();
 }
@@ -160,59 +122,40 @@ static struct of_dev_auxdata msm8974_auxdata_lookup[] __initdata = {
 	{}
 };
 
-static void __init msm8974_map_io(void)
+static void __init ursa_map_io(void)
 {
 	msm_map_8974_io();
 }
 
+int wait = 1;
+
+void ursa_init_gpiomux(void);
+
 void __init ursa_init(void)
 {
 	struct of_dev_auxdata *adata = msm8974_auxdata_lookup;
-	static struct regulator *reg_l17, *reg_l18;
+
+	/*
+	 * populate devices from DT first so smem probe will get called as part
+	 * of msm_smem_init.  socinfo_init needs smem support so call
+	 * msm_smem_init before it.  msm_8974_init_gpiomux needs socinfo so
+	 * call socinfo_init before it.
+	 */
+	board_dt_populate(adata);
+	pr_err("%s: board_dt_populate()\n", __func__);
+
+	msm_smem_init();
 
 	if (socinfo_init() < 0)
 		pr_err("%s: socinfo_init() failed\n", __func__);
 
-	/* Populate system_rev with board revision, which is stored in smem
-	 * and shared between SBL1, LK and Kernel. The board revision itself is
-	 * detected during SBL1 bootup and stored in smem.
-	 */
-	system_rev = socinfo_get_platform_version();
+	/* Populate system_rev with board revision */
+	system_rev = ursa_board_revision();
 	pr_info("%s: URSA board revision %d\n", __func__, system_rev);
 
 	ursa_init_gpiomux();
 	regulator_has_full_constraints();
-	board_dt_populate(adata);
 	ursa_add_drivers();
-
-	/* Enable l17 and l18 in order. To be removed if adsp implements
-	 * controlling these rails.
-	 */
-	reg_l17 = regulator_get(NULL, "8941_l17");
-	if (IS_ERR_OR_NULL(reg_l17)) {
-		pr_err("could not get 8941_l17\n");
-		goto err;
-	}
-
-	reg_l18 = regulator_get(NULL, "8941_l18");
-	if (IS_ERR_OR_NULL(reg_l18)) {
-		pr_err("could not get 8941_l18\n");
-		goto err;
-	}
-
-	if (regulator_enable(reg_l17)) {
-		pr_err("enable 8941_l17 failed\n");
-		goto err;
-	}
-	mdelay(1);
-
-	if (regulator_enable(reg_l18)) {
-		pr_err("enable 8941_l17 failed\n");
-	}
-	pr_info("l17 and l18 enabled\n");
-
-err:
-	return;
 }
 
 void __init ursa_init_very_early(void)
@@ -225,15 +168,12 @@ static const char *ursa_dt_match[] __initconst = {
 	NULL
 };
 
-DT_MACHINE_START(URSA_DT, "Amazon/Lab126 URSA Board (Flattened Device Tree)")
-	.map_io = msm8974_map_io,
-	.init_irq = msm_dt_init_irq,
-	.init_machine = ursa_init,
-	.handle_irq = gic_handle_irq,
-	.timer = &msm_dt_timer,
-	.dt_compat = ursa_dt_match,
-	.reserve = ursa_reserve,
-	.init_very_early = ursa_init_very_early,
-	.restart = msm_restart,
-	.smp = &msm8974_smp_ops,
+DT_MACHINE_START(MSM8974_DT, "Amazon/Lab126 URSA Board (Flattened Device Tree)")
+	.map_io 		= ursa_map_io,
+	.init_machine 		= ursa_init,
+	.dt_compat 		= ursa_dt_match,
+	.reserve 		= ursa_reserve,
+	.init_very_early 	= ursa_init_very_early,
+	.restart 		= msm_restart,
+	.smp 			= &msm8974_smp_ops,
 MACHINE_END

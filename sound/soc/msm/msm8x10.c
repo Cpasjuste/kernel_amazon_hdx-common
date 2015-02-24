@@ -24,8 +24,7 @@
 #include <sound/soc-dapm.h>
 #include <sound/pcm.h>
 #include <sound/jack.h>
-#include <asm/mach-types.h>
-#include <mach/socinfo.h>
+#include <soc/qcom/socinfo.h>
 #include <qdsp6v2/msm-pcm-routing-v2.h>
 #include <sound/q6afe-v2.h>
 #include <linux/module.h>
@@ -106,6 +105,7 @@ static struct wcd9xxx_mbhc_config mbhc_cfg = {
 			    1 << MBHC_CS_ENABLE_REMOVAL),
 	.do_recalibration = false,
 	.use_vddio_meas = false,
+	.hw_jack_type = FOUR_POLE_JACK,
 };
 
 /*
@@ -165,8 +165,6 @@ static const struct snd_soc_dapm_widget msm8x10_dapm_widgets[] = {
 	SND_SOC_DAPM_MIC("Handset Mic", NULL),
 	SND_SOC_DAPM_MIC("Headset Mic", NULL),
 	SND_SOC_DAPM_MIC("Secondary Mic", NULL),
-	SND_SOC_DAPM_MIC("Digital Mic1", NULL),
-	SND_SOC_DAPM_MIC("Digital Mic2", NULL),
 };
 static int msm8x10_ext_spk_power_amp_init(void)
 {
@@ -250,8 +248,8 @@ static int msm_be_fm_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	struct snd_interval *rate = hw_param_interval(params,
 					SNDRV_PCM_HW_PARAM_RATE);
 
-	struct snd_interval *channels = hw_param_interval(params,
-					SNDRV_PCM_HW_PARAM_CHANNELS);
+	struct snd_interval *channels =
+	    hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
 
 	pr_debug("%s()\n", __func__);
 	rate->min = rate->max = 48000;
@@ -878,6 +876,21 @@ static struct snd_soc_dai_link msm8x10_dai[] = {
 		.codec_name = "snd-soc-dummy",
 	},
 	{/* hw:x,14 */
+		.name = "MSM8x10 Media9",
+		.stream_name = "MultiMedia9",
+		.cpu_dai_name   = "MultiMedia9",
+		.platform_name  = "msm-pcm-dsp.0",
+		.dynamic = 1,
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			    SND_SOC_DPCM_TRIGGER_POST},
+		.ignore_suspend = 1,
+		/* This dailink has playback support */
+		.ignore_pmdown_time = 1,
+		.be_id = MSM_FRONTEND_DAI_MULTIMEDIA9,
+	},
+	{/* hw:x,15 */
 		.name = "QCHAT",
 		.stream_name = "QCHAT",
 		.cpu_dai_name   = "QCHAT",
@@ -892,21 +905,6 @@ static struct snd_soc_dai_link msm8x10_dai[] = {
 		.codec_dai_name = "snd-soc-dummy-dai",
 		.codec_name = "snd-soc-dummy",
 		.be_id = MSM_FRONTEND_DAI_QCHAT,
-	},
-	{/* hw:x,15 */
-		.name = "MSM8X10 Media9",
-		.stream_name = "MultiMedia9",
-		.cpu_dai_name   = "MultiMedia9",
-		.platform_name  = "msm-pcm-dsp.0",
-		.dynamic = 1,
-		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
-			SND_SOC_DPCM_TRIGGER_POST},
-		.codec_dai_name = "snd-soc-dummy-dai",
-		.codec_name = "snd-soc-dummy",
-		.ignore_suspend = 1,
-		/* this dainlink has playback support */
-		.ignore_pmdown_time = 1,
-		.be_id = MSM_FRONTEND_DAI_MULTIMEDIA9
 	},
 	/* Backend I2S DAI Links */
 	{
@@ -1075,9 +1073,10 @@ struct snd_soc_card snd_soc_card_msm8x10 = {
 };
 
 
-static __devinit int msm8x10_asoc_machine_probe(struct platform_device *pdev)
+static int msm8x10_asoc_machine_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = &snd_soc_card_msm8x10;
+	const char *mbhc_audio_jack_type = NULL;
 	int ret;
 
 	dev_dbg(&pdev->dev, "%s\n", __func__);
@@ -1098,45 +1097,57 @@ static __devinit int msm8x10_asoc_machine_probe(struct platform_device *pdev)
 	if (ret)
 		goto err;
 
-	mutex_init(&cdc_mclk_mutex);
 	pcbcr = ioremap(MSM8X10_DINO_LPASS_DIGCODEC_CBCR, 4);
-	if (!pcbcr) {
-		ret = -ENOMEM;
-		goto err1;
-	}
 	prcgr = ioremap(MSM8X10_DINO_LPASS_DIGCODEC_CMD_RCGR, 4);
-	if (!prcgr) {
-		ret = -ENOMEM;
-		goto err1;
-	}
-	atomic_set(&mclk_rsc_ref, 0);
 	mbhc_cfg.gpio_level_insert = of_property_read_bool(pdev->dev.of_node,
 						"qcom,headset-jack-type-NC");
 	mbhc_cfg.use_int_rbias = of_property_read_bool(pdev->dev.of_node,
 						"qcom,mbhc-bias-internal");
 
-	spdev = pdev;
+	ret = of_property_read_string(pdev->dev.of_node,
+		"qcom,mbhc-audio-jack-type", &mbhc_audio_jack_type);
+	if (ret) {
+		dev_dbg(&pdev->dev, "Looking up %s property in node %s failed",
+			"qcom,mbhc-audio-jack-type",
+			pdev->dev.of_node->full_name);
+		mbhc_cfg.hw_jack_type = FOUR_POLE_JACK;
+		mbhc_cfg.enable_anc_mic_detect = false;
+		dev_dbg(&pdev->dev, "Jack type properties set to default");
+	} else {
+		if (!strcmp(mbhc_audio_jack_type, "4-pole-jack")) {
+			mbhc_cfg.hw_jack_type = FOUR_POLE_JACK;
+			mbhc_cfg.enable_anc_mic_detect = false;
+			dev_dbg(&pdev->dev, "This hardware has 4 pole jack");
+		} else if (!strcmp(mbhc_audio_jack_type, "5-pole-jack")) {
+			mbhc_cfg.hw_jack_type = FIVE_POLE_JACK;
+			mbhc_cfg.enable_anc_mic_detect = true;
+			dev_dbg(&pdev->dev, "This hardware has 5 pole jack");
+		} else if (!strcmp(mbhc_audio_jack_type, "6-pole-jack")) {
+			mbhc_cfg.hw_jack_type = SIX_POLE_JACK;
+			mbhc_cfg.enable_anc_mic_detect = true;
+			dev_dbg(&pdev->dev, "This hardware has 6 pole jack");
+		} else {
+			mbhc_cfg.hw_jack_type = FOUR_POLE_JACK;
+			mbhc_cfg.enable_anc_mic_detect = false;
+			dev_dbg(&pdev->dev, "Unknown value, hence setting to default");
+		}
+	}
 
+	spdev = pdev;
+	mutex_init(&cdc_mclk_mutex);
 	ret = snd_soc_register_card(card);
-	if (ret == -EPROBE_DEFER)
-		goto err1;
-	else if (ret) {
+	if (ret) {
 		dev_err(&pdev->dev, "snd_soc_register_card failed (%d)\n",
 			ret);
-		goto err1;
+		goto err;
 	}
+	atomic_set(&mclk_rsc_ref, 0);
 	return 0;
-err1:
-	mutex_destroy(&cdc_mclk_mutex);
-	if (pcbcr)
-		iounmap(pcbcr);
-	if (prcgr)
-		iounmap(prcgr);
 err:
 	return ret;
 }
 
-static int __devexit msm8x10_asoc_machine_remove(struct platform_device *pdev)
+static int msm8x10_asoc_machine_remove(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = platform_get_drvdata(pdev);
 
@@ -1163,7 +1174,7 @@ static struct platform_driver msm8x10_asoc_machine_driver = {
 		.of_match_table = msm8x10_asoc_machine_of_match,
 	},
 	.probe = msm8x10_asoc_machine_probe,
-	.remove = __devexit_p(msm8x10_asoc_machine_remove),
+	.remove = msm8x10_asoc_machine_remove,
 };
 module_platform_driver(msm8x10_asoc_machine_driver);
 

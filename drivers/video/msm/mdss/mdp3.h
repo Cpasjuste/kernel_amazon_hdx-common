@@ -18,9 +18,8 @@
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
-#include <linux/earlysuspend.h>
 
-#include <mach/iommu_domains.h>
+#include <linux/msm_iommu_domains.h>
 
 #include "mdp3_dma.h"
 #include "mdss_fb.h"
@@ -103,7 +102,7 @@ struct mdp3_iommu_meta {
 	struct dma_buf *dbuf;
 	int mapped_size;
 	unsigned long size;
-	unsigned long iova_addr;
+	dma_addr_t iova_addr;
 	unsigned long flags;
 };
 
@@ -149,10 +148,9 @@ struct mdp3_hw_resource {
 
 	int irq_registered;
 
-	struct early_suspend suspend_handler;
-	struct mdss_panel_cfg pan_cfg;
 	unsigned long splash_mem_addr;
 	u32 splash_mem_size;
+	struct mdss_panel_cfg pan_cfg;
 
 	int clk_prepare_count;
 	int cont_splash_en;
@@ -162,7 +160,7 @@ struct mdp3_hw_resource {
 };
 
 struct mdp3_img_data {
-	u32 addr;
+	dma_addr_t addr;
 	u32 len;
 	u32 padding;
 	u32 flags;
@@ -199,12 +197,10 @@ int mdp3_create_sysfs_link(struct device *dev);
 int mdp3_get_cont_spash_en(void);
 int mdp3_get_mdp_dsi_clk(void);
 int mdp3_put_mdp_dsi_clk(void);
-void mdp3_batfet_ctrl(int enable);
 
 int mdp3_misr_set(struct mdp_misr *misr_req);
 int mdp3_misr_get(struct mdp_misr *misr_resp);
-void mdp3_check_dsi_ctrl_status(struct work_struct *work,
-				uint32_t interval);
+void mdp3_batfet_ctrl(int enable);
 
 #define MDP3_REG_WRITE(addr, val) writel_relaxed(val, mdp3_res->mdp_base + addr)
 #define MDP3_REG_READ(addr) readl_relaxed(mdp3_res->mdp_base + addr)

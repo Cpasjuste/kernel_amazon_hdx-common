@@ -26,7 +26,6 @@
 #include <linux/miscdevice.h>
 #include <linux/atomic.h>
 #include <linux/module.h>
-#include <linux/sched.h>
 
 #include "trapz_device.h"
 #ifdef CONFIG_TRAPZ_TRIGGER
@@ -177,7 +176,6 @@ long systrapz(unsigned int ctrl, unsigned int extra1, unsigned int extra2,
 	trapz_entry_t *pEntry1 = NULL, *pEntry2 = NULL;
 	trapz_info_t kti;
 	struct timespec ts;
-	u64 tv;
 	u8 counter, extra_count = 0;
 #ifdef CONFIG_TRAPZ_TRIGGER
 	trapz_trigger_event_t trigger_event;
@@ -194,8 +192,7 @@ long systrapz(unsigned int ctrl, unsigned int extra1, unsigned int extra2,
 	/* Filter out events based on log level */
 	if (trapz_check_loglevel(level, cat_id, comp_id)) {
 		/* Not filtered by log level */
-		tv = trace_clock_global();
-		ts = ktime_to_timespec(ns_to_ktime(tv));
+		getnstimeofday(&ts);
 		filtered = 0;
 		/*Determine if we need an additional
 			record to hold the extras */
@@ -226,8 +223,8 @@ long systrapz(unsigned int ctrl, unsigned int extra1, unsigned int extra2,
 	if (filtered) {
 		/* Trapz call filtered out, return time if requested */
 		if (ti != NULL) {
-			tv = trace_clock_global();
-			kti.ts = ktime_to_timespec(ns_to_ktime(tv));
+			getnstimeofday(&ts);
+			kti.ts = ts;
 			kti.counter = -1;
 
 			if (copy_to_user(ti, &kti, sizeof(kti)))

@@ -18,7 +18,6 @@
 #include <media/v4l2-subdev.h>
 #include <media/msmb_ispif.h>
 #include "msm_sd.h"
-#include "msm_ispif_frame_event.h"
 
 struct ispif_irq_status {
 	uint32_t ispifIrqStatus0;
@@ -59,7 +58,6 @@ struct ispif_device {
 	enum msm_ispif_state_t ispif_state;
 	struct msm_ispif_vfe_info vfe_info;
 	struct clk *ahb_clk;
-	struct frame_event_mgr fem;
 	struct completion reset_complete[VFE_MAX];
 	uint32_t hw_num_isps;
 };

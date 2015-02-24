@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -12,8 +12,8 @@
 #ifndef __Q6_ASM_V2_H__
 #define __Q6_ASM_V2_H__
 
-#include <mach/qdsp6v2/apr.h>
-#include <mach/qdsp6v2/rtac.h>
+#include <linux/qdsp6v2/apr.h>
+#include <linux/qdsp6v2/rtac.h>
 #include <sound/apr_audio-v2.h>
 #include <linux/list.h>
 #include <linux/msm_ion.h>
@@ -44,6 +44,7 @@
 #define FORMAT_MULTI_CHANNEL_LINEAR_PCM 0x0012
 #define FORMAT_AC3          0x0013
 #define FORMAT_EAC3         0x0014
+#define FORMAT_MP2          0x0015
 
 #define ENCDEC_SBCBITRATE   0x0001
 #define ENCDEC_IMMEDIATE_DECODE 0x0002
@@ -108,8 +109,11 @@ enum {
 	SOFT_PAUSE_CURVE_LOG,
 };
 
-#define SOFT_VOLUME_PERIOD       30   /* ramp up/down for 30ms    */
-#define SOFT_VOLUME_STEP         0 /* Step value 0ms or 0us */
+/* ramp up/down for 30ms    */
+#define SOFT_VOLUME_PERIOD       30
+/* Step value 0ms or 0us */
+#define SOFT_VOLUME_STEP         0
+
 enum {
 	SOFT_VOLUME_CURVE_LINEAR = 0,
 	SOFT_VOLUME_CURVE_EXP,
@@ -130,7 +134,7 @@ struct audio_buffer {
 };
 
 struct audio_aio_write_param {
-	unsigned long paddr;
+	phys_addr_t   paddr;
 	uint32_t      len;
 	uint32_t      uid;
 	uint32_t      lsw_ts;
@@ -141,7 +145,7 @@ struct audio_aio_write_param {
 };
 
 struct audio_aio_read_param {
-	unsigned long paddr;
+	phys_addr_t   paddr;
 	uint32_t      len;
 	uint32_t      uid;
 };
@@ -218,6 +222,9 @@ int q6asm_stream_open_write_v2(struct audio_client *ac, uint32_t format,
 				uint16_t bits_per_sample, int32_t stream_id,
 				bool is_gapless_mode);
 
+int q6asm_open_write_compressed(struct audio_client *ac, uint32_t format,
+				uint32_t passthrough_flag);
+
 int q6asm_open_read_write(struct audio_client *ac,
 			uint32_t rd_format,
 			uint32_t wr_format);
@@ -239,10 +246,10 @@ int q6asm_async_read(struct audio_client *ac,
 int q6asm_read(struct audio_client *ac);
 int q6asm_read_nolock(struct audio_client *ac);
 
-int q6asm_memory_map(struct audio_client *ac, uint32_t buf_add,
+int q6asm_memory_map(struct audio_client *ac, phys_addr_t buf_add,
 			int dir, uint32_t bufsz, uint32_t bufcnt);
 
-int q6asm_memory_unmap(struct audio_client *ac, uint32_t buf_add,
+int q6asm_memory_unmap(struct audio_client *ac, phys_addr_t buf_add,
 							int dir);
 
 int q6asm_unmap_cal_blocks(void);
@@ -331,6 +338,10 @@ int q6asm_media_format_block_pcm_format_support(struct audio_client *ac,
 			uint32_t rate, uint32_t channels,
 			uint16_t bits_per_sample);
 
+int q6asm_media_format_block_pcm_format_support_v2(struct audio_client *ac,
+				uint32_t rate, uint32_t channels,
+				uint16_t bits_per_sample, int stream_id);
+
 int q6asm_media_format_block_multi_ch_pcm(struct audio_client *ac,
 			uint32_t rate, uint32_t channels,
 			bool use_default_chmap, char *channel_map);
@@ -361,6 +372,10 @@ int q6asm_media_format_block_amrwbplus(struct audio_client *ac,
 
 int q6asm_ds1_set_endp_params(struct audio_client *ac,
 				int param_id, int param_value);
+
+/* Send stream based end params */
+int q6asm_ds1_set_stream_endp_params(struct audio_client *ac, int param_id,
+				     int param_value, int stream_id);
 
 /* PP specific */
 int q6asm_equalizer(struct audio_client *ac, void *eq);

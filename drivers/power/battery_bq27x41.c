@@ -17,22 +17,16 @@
 #include <linux/reboot.h>
 #include <linux/timer.h>
 #include <linux/syscalls.h>
-#include <linux/sysdev.h>
 #include <linux/power_supply.h>
 #include <linux/slab.h>
+#include <linux/suspend.h>
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 #include <linux/metricslog.h>
-#if defined(CONFIG_EARLYSUSPEND)
-#include <linux/earlysuspend.h>
-#elif defined(CONFIG_FB)
+#if defined(CONFIG_FB)
 #include <linux/notifier.h>
 #include <linux/fb.h>
 #endif
 #endif /* defined(CONFIG_AMAZON_METRICS_LOG) */
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-#include "battery_bq27x41.h"
-#endif
 
 /*
  * I2C registers that need to be read
@@ -76,7 +70,7 @@
 #define BQ27X41_FLAGS_OTC		(1 << 15)
 
 #define BQ27X41_I2C_ADDRESS		0x55	/* Battery I2C address on the bus */
-#define BQ27X41_TEMP_LOW_THRESHOLD	0	/* Low temp cutoff in 0.1 C */
+#define BQ27X41_TEMP_LOW_THRESHOLD	-30	/* Low temp cutoff in 0.1 C */
 #define BQ27X41_TEMP_HI_THRESHOLD	600	/* High temp cutoff in 0.1 C */
 #define BQ27X41_TEMP_MID_THRESHOLD	100	/* Mid temperature threshold in 0.1 C */
 #define BQ27X41_VOLT_LOW_THRESHOLD	2500	/* Low voltage threshold in mV */
@@ -105,6 +99,9 @@
 
 #define BQ27X41_BATTERY_RELAXED_THRESH	7200	/* Every 10 hours or 36000 seconds */
 
+#define DRAIN_INVALID      -999999
+#define DRAIN_HIGH_INVALID -999999
+
 int bq27x41_battery_tte = 0;
 
 EXPORT_SYMBOL(bq27x41_battery_tte);
@@ -129,18 +126,19 @@ struct bq27x41_info {
 	struct delayed_work battery_work;
 	/* Time when system enters full suspend */
 	struct timespec suspend_time;
-	/* Time when system enters early suspend */
-	struct timespec early_suspend_time;
+	/* Time when resume callback received */
+	struct timespec resume_time;
 	/* Battery capacity when system enters full suspend */
 	int suspend_capacity;
 	int suspend_capacity_high;  /* no need to expose in sysfs */
-	/* Battery capacity when system enters early suspend */
-	int early_suspend_capacity;
+	/* Time since last suspend/resume metric */
+	struct timespec saved_screen_metrics_time;
+	/* Battery capacity at last suspend/resume metric output */
+	int saved_screen_metrics_capacity;
 	unsigned int poll_interval;
+	struct notifier_block pm_notify;
 #if defined(CONFIG_AMAZON_METRICS_LOG)
-#if defined(CONFIG_EARLYSUSPEND)
-	struct early_suspend early_suspend;
-#elif defined(CONFIG_FB)
+#if defined(CONFIG_FB)
 	struct notifier_block fb_notif;
 #endif
 #endif
@@ -155,12 +153,6 @@ struct bq27x41_info {
 
 static int temp_error_counter = 0;
 static int volt_error_counter = 0;
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-static int32_t current_battery_voltage;
-static int32_t current_battery_temperature;
-static int32_t current_battery_current;
-#endif
 
 static struct i2c_client *bq27x41_battery_i2c_client;
 
@@ -385,7 +377,7 @@ static int bq27x41_read_manufacturer_id(struct bq27x41_info *info)
 			"MCN KC4 ", BQ27X41_MANUFACTURER_LENGTH) &&
 		strncmp(info->manufacturer_id,
 			"SWE KC4 ", BQ27X41_MANUFACTURER_LENGTH))
-#elif defined(CONFIG_ARCH_MSM8974_APOLLO)
+#elif defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_APQ8084_SATURN)
 	if (strncmp(info->manufacturer_id,
 			"DSY APL ", BQ27X41_MANUFACTURER_LENGTH) &&
 		strncmp(info->manufacturer_id,
@@ -396,31 +388,16 @@ static int bq27x41_read_manufacturer_id(struct bq27x41_info *info)
 	{
 		strlcpy(info->manufacturer_id,
 			"UNKNOWN", BQ27X41_MANUFACTURER_LENGTH);
+
+		dev_err(&info->client->dev,
+			"Invalid battery id: %s\n",
+			info->manufacturer_id);
+
+		return -EINVAL;
 	}
 
 	return 0;
 }
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-int32_t get_battery_parameters(int prop_type)
-{
-	switch (prop_type) {
-	case GET_BAT_VOLTAGE:
-			return current_battery_voltage;
-			break;
-	case GET_BAT_TEMPERATURE:
-			return current_battery_temperature;
-			break;
-	case GET_BAT_CURRENT:
-			return current_battery_current;
-			break;
-	default:
-			break;
-	}
-	return 0;
-
-}
-#endif
 
 /* Main battery timer task */
 static void battery_handle_work(struct work_struct *work)
@@ -443,8 +420,6 @@ static void battery_handle_work(struct work_struct *work)
 			info->battery_temperature = value;
 			batt_err_flag |= DATA_CHANGED;
 		}
-
-		info->i2c_err = 0;
 	}
 
 	/*
@@ -487,8 +462,6 @@ static void battery_handle_work(struct work_struct *work)
 			info->battery_voltage = value;
 			batt_err_flag |= DATA_CHANGED;
 		}
-
-		info->i2c_err = 0;
 	}
 
 	/* Check for critical battery voltage */
@@ -520,7 +493,7 @@ static void battery_handle_work(struct work_struct *work)
 	}
 
 	if (volt_error_counter > BQ27X41_ERROR_THRESHOLD) {
-		printk(KERN_ERR "battery driver voltage - %d mV\n",
+		printk(KERN_ERR "Error: battery driver voltage - %d mV\n",
 				info->battery_voltage);
 		info->err_flags |= VOLTAGE_ERROR;
 		volt_error_counter = 0;
@@ -538,8 +511,6 @@ static void battery_handle_work(struct work_struct *work)
 			info->battery_current = value;
 			batt_err_flag |= DATA_CHANGED;
 		}
-
-		info->i2c_err = 0;
 	}
 
 	/*
@@ -549,21 +520,18 @@ static void battery_handle_work(struct work_struct *work)
 	if (err) {
 		batt_err_flag |= GENERAL_ERROR;
 		goto out;
-	} else {
+	}
+	if (info->battery_capacity != value) {
 #ifdef CONFIG_AMAZON_METRICS_LOG
-		if (value == 100 && info->battery_capacity != value) {
+		if (value == 100) {
 			char buf[128];
 			snprintf(buf, sizeof(buf),
-			"bq27x41:def:POWER_STATUS_FULL_CHARGE=1;CT;1:NR");
+				"bq27x41:def:POWER_STATUS_FULL_CHARGE=1;CT;1:NR");
 			log_to_metrics(ANDROID_LOG_INFO, "battery", buf);
 		}
 #endif
-		if (info->battery_capacity != value) {
-			info->battery_capacity = value;
-			batt_err_flag |= DATA_CHANGED;
-		}
-
-		info->i2c_err = 0;
+		info->battery_capacity = value;
+		batt_err_flag |= DATA_CHANGED;
 	}
 
 	/*
@@ -592,9 +560,12 @@ static void battery_handle_work(struct work_struct *work)
 			batt_err_flag |= DATA_CHANGED;
 		}
 
+		/* Check battery health */
+		value = info->battery_health;
+
 		if (flags & (BQ27X41_FLAGS_OTC | BQ27X41_FLAGS_OTD)) {
 			value = POWER_SUPPLY_HEALTH_OVERHEAT;
-		} else {
+		} else if (value == POWER_SUPPLY_HEALTH_UNKNOWN) {
 			value = POWER_SUPPLY_HEALTH_GOOD;
 		}
 
@@ -602,8 +573,6 @@ static void battery_handle_work(struct work_struct *work)
 			info->battery_health = value;
 			batt_err_flag |= DATA_CHANGED;
 		}
-
-		info->i2c_err = 0;
 	}
 
 	/*
@@ -618,8 +587,6 @@ static void battery_handle_work(struct work_struct *work)
 			info->battery_remaining_charge = value;
 			batt_err_flag |= DATA_CHANGED;
 		}
-
-		info->i2c_err = 0;
 	}
 
 	/*
@@ -634,19 +601,6 @@ static void battery_handle_work(struct work_struct *work)
 			info->battery_remaining_charge_design = value;
 			batt_err_flag |= DATA_CHANGED;
 		}
-
-		info->i2c_err = 0;
-	}
-
-	/*
-	 * Read the manufacturer ID
-	 */
-	err = bq27x41_read_manufacturer_id(info);
-	if (err) {
-		batt_err_flag |= GENERAL_ERROR;
-		goto out;
-	} else {
-		info->i2c_err = 0;
 	}
 
 	/*
@@ -662,7 +616,6 @@ static void battery_handle_work(struct work_struct *work)
 			batt_err_flag |= DATA_CHANGED;
 		}
 
-		info->i2c_err = 0;
 	}
 
 	/*
@@ -677,8 +630,6 @@ static void battery_handle_work(struct work_struct *work)
 			info->battery_full_charge_design = value;
 			batt_err_flag |= DATA_CHANGED;
 		}
-
-		info->i2c_err = 0;
 	}
 
 	/*
@@ -693,8 +644,6 @@ static void battery_handle_work(struct work_struct *work)
 			info->battery_available_energy = value;
 			batt_err_flag |= DATA_CHANGED;
 		}
-
-		info->i2c_err = 0;
 	}
 
 	/* TTE readings */
@@ -702,21 +651,17 @@ static void battery_handle_work(struct work_struct *work)
 	if (err) {
 		batt_err_flag |= GENERAL_ERROR;
 		goto out;
-	} else {
-		info->i2c_err = 0;
 	}
-
 #if 0
 	/* Full Available Capacity */
 	err = bq27x41_battery_read_fac(&bq27x41_battery_fac);
 	if (err) {
 		batt_err_flag |= GENERAL_ERROR;
 		goto out;
-	} else {
-		info->i2c_err = 0;
 	}
 #endif
 
+	info->i2c_err = 0;
 out:
 	if (batt_err_flag) {
 		if (++info->i2c_err == BQ27X41_BATTERY_RETRY_THRESHOLD) {
@@ -740,7 +685,7 @@ out:
 
 	if (batt_err_flag & GENERAL_ERROR) {
 		/* Notify upper layers battery is dead */
-		info->battery_health = POWER_SUPPLY_HEALTH_UNKNOWN;
+		info->battery_health = POWER_SUPPLY_HEALTH_DEAD;
 		power_supply_changed(&info->battery);
 
 		schedule_delayed_work(&info->battery_work,
@@ -765,32 +710,27 @@ static int bq27x41_get_property(struct power_supply *ps,
 {
 	struct bq27x41_info *info = container_of(ps,
 			struct bq27x41_info, battery);
+
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = info->battery_status;
 		break;
+	case POWER_SUPPLY_PROP_PRESENT:
+		val->intval = 1;
+		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		/* Convert mV to uV */
 		val->intval = info->battery_voltage * 1000;
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-		current_battery_voltage = info->battery_voltage * 1000;
-#endif
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		/* Convert mA to uA */
 		val->intval = info->battery_current * 1000;
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-		current_battery_current = info->battery_current * 1000;
-#endif
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		val->intval = info->battery_capacity;
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
 		val->intval = info->battery_temperature;
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-		current_battery_temperature = info->battery_temperature;
-#endif
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
 		val->intval = info->battery_health;
@@ -802,10 +742,10 @@ static int bq27x41_get_property(struct power_supply *ps,
 		/* Convert mAh to uAh */
 		val->intval = info->battery_remaining_charge * 1000;
 		break;
-	case POWER_SUPPLY_PROP_CHARGE_NOW_DESIGN:
-		/* Convert mAh to uAh */
-		val->intval = info->battery_remaining_charge_design * 1000;
-		break;
+
+
+
+
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		/* Convert mAh to uAh */
 		val->intval = info->battery_full_charge * 1000;
@@ -841,12 +781,13 @@ static int bq27x41_get_property(struct power_supply *ps,
 
 static enum power_supply_property bq27x41_battery_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
-	POWER_SUPPLY_PROP_CHARGE_NOW_DESIGN,
+
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_ENERGY_AVG,
@@ -861,62 +802,47 @@ static enum power_supply_property bq27x41_battery_props[] = {
 };
 
 #if defined(CONFIG_AMAZON_METRICS_LOG)
-static void bq27x41_log_metrics(struct bq27x41_info *info, char *msg,
-					char *metricsmsg)
+static void bq27x41_log_screen_metrics(struct bq27x41_info *info, char *msg,
+				char *metricsmsg)
 {
 	int value = info->battery_capacity;
 
-	struct timespec curr = current_kernel_time();
-       /* Compute elapsed time and determine screen off or on drainage */
-       struct timespec diff = timespec_sub(curr,
-			info->early_suspend_time);
+	struct timespec current_time = current_kernel_time();
+	/* Compute elapsed time and determine screen off or on drainage */
+	struct timespec diff = timespec_sub(current_time,
+					info->saved_screen_metrics_time);
 
-	if (info->early_suspend_capacity != -1) {
+	if (info->saved_screen_metrics_capacity != -1) {
 		char buf[512];
 		snprintf(buf, sizeof(buf),
 			"%s:def:value=%d;CT;1,elapsed=%ld;TI;1:NR",
 			metricsmsg,
-			info->early_suspend_capacity - value,
+			info->saved_screen_metrics_capacity - value,
 			diff.tv_sec * 1000 + diff.tv_nsec / NSEC_PER_MSEC);
 		log_to_metrics(ANDROID_LOG_INFO, "drain_metrics", buf);
 		dev_info(&bq27x41_battery_i2c_client->dev,
 			"%s: %d %% over %ld msecs\n", msg,
-			info->early_suspend_capacity - value,
+			info->saved_screen_metrics_capacity - value,
 			diff.tv_sec * 1000 + diff.tv_nsec / NSEC_PER_MSEC);
 	}
 	/* Cache the current capacity */
-	info->early_suspend_capacity = info->battery_capacity;
+	info->saved_screen_metrics_capacity = info->battery_capacity;
 	/* Mark the suspend or resume time */
-	info->early_suspend_time = curr;
+	info->saved_screen_metrics_time = current_time;
 }
 static void bq27x41_early_suspend(struct bq27x41_info *info)
 {
-	bq27x41_log_metrics(info, "Screen on drainage", "screen_on_drain");
+	bq27x41_log_screen_metrics(info, "Screen on drainage",
+				"screen_on_drain");
 }
 
 static void bq27x41_late_resume(struct bq27x41_info *info)
 {
-	bq27x41_log_metrics(info, "Screen off drainage", "screen_off_drain");
+	bq27x41_log_screen_metrics(info, "Screen off drainage",
+				"screen_off_drain");
 }
 
-#if defined(CONFIG_EARLYSUSPEND)
-static void bq27x41_early_suspend_cb(struct early_suspend *handler)
-{
-	struct bq27x41_info *info = container_of(handler,
-			struct bq27x41_info, early_suspend);
-
-	bq27x41_early_suspend(info);
-}
-
-static void bq27x41_late_resume_cb(struct early_suspend *handler)
-{
-	struct bq27x41_info *info = container_of(handler,
-			struct bq27x41_info, early_suspend);
-
-	bq27x41_late_resume(info);
-}
-
-#elif defined(CONFIG_FB)
+#if defined(CONFIG_FB)
 static int fb_notifier_callback(struct notifier_block *self,
 				 unsigned long event, void *data)
 {
@@ -940,6 +866,190 @@ static int fb_notifier_callback(struct notifier_block *self,
 
 #endif
 #endif /* defined(CONFIG_AMAZON_METRICS_LOG) */
+
+static int pm_notifier_callback(struct notifier_block *self,
+				unsigned long event, void *unused)
+{
+	struct bq27x41_info *info = container_of(self,
+						struct bq27x41_info, pm_notify);
+	int err = 0, value = 0;
+	int cap_drain, hp_drain;
+#if defined(CONFIG_AMAZON_METRICS_LOG)
+	struct timespec diff;
+	long suspend_time;
+#endif
+
+	switch (event) {
+	case PM_POST_SUSPEND: {
+		/*
+		 * Check for the battery voltage
+		 */
+		err = bq27x41_battery_read_voltage(&value);
+		if (err) {
+			info->i2c_err++;
+			goto out;
+		}
+		info->battery_voltage = value;
+
+		/*
+		 * Check for remaining charge
+		 */
+		err = bq27x41_battery_read_remaining_charge(&value);
+		if (err) {
+			info->i2c_err++;
+			goto out;
+		}
+		info->battery_remaining_charge = value;
+
+		/*
+		 * Check for remaining charge (uncompensated)
+		 */
+		err = bq27x41_battery_read_remaining_charge_design(&value);
+		if (err) {
+			info->i2c_err++;
+			goto out;
+		}
+		info->battery_remaining_charge_design = value;
+
+		/*
+		 * Read the gas gauge capacity
+		 */
+		err = bq27x41_battery_read_capacity(&value);
+		if (err) {
+			info->i2c_err++;
+			goto out;
+		}
+		info->battery_capacity = value;
+
+		/*
+		 * Check for battery temperature
+		 */
+		err = bq27x41_battery_read_temperature(&value);
+		if (err) {
+			info->i2c_err++;
+			goto out;
+		}
+		info->battery_temperature = value;
+
+		/* Report to upper layers */
+		power_supply_changed(&info->battery);
+		info->i2c_err = 0;
+
+#if defined(CONFIG_AMAZON_METRICS_LOG)
+		if (info->battery_status == POWER_SUPPLY_STATUS_CHARGING ||
+		    (info->resume_time.tv_sec == 0 &&
+		     info->resume_time.tv_nsec == 0)) {
+			goto out;
+		}
+
+		/* Compute elapsed time in suspend */
+		diff = timespec_sub(info->resume_time,
+			info->suspend_time);
+		suspend_time =
+			diff.tv_sec * 1000 +
+			diff.tv_nsec / NSEC_PER_MSEC;
+		info->suspend_realtime += diff.tv_sec;
+
+		/*
+		 * PM_POST_SUSPEND is observed to execute in cases
+		 * where suspend was not achieved, and
+		 * i2c_driver.suspend() may or may not have been
+		 * called.
+		 *  1. Upon reboot, before bq27x41_battery_suspend() makes
+		 *     info->suspend_time valid.
+		 *  2. In the "Freezing of tasks aborted" case.
+		 *
+		 * So, invalidate here the timestamp set earlier, in
+		 * bq27x41_battery_resume().
+		 */
+		info->resume_time.tv_sec = 0;
+		info->resume_time.tv_nsec = 0;
+
+		/* Determine suspend drainage */
+		if (likely(!err)) {
+			if (info->suspend_capacity >= 0) {
+				cap_drain = info->suspend_capacity -
+					info->battery_capacity;
+				if (info->suspend_drain == DRAIN_INVALID)
+					info->suspend_drain = 0;
+				info->suspend_drain += cap_drain;
+			} else {
+				info->suspend_drain = DRAIN_INVALID;
+				err = -EIO;
+			}
+			if (info->suspend_capacity_high >= 0) {
+				int capacity_high =
+					info->battery_remaining_charge * 10000 /
+					info->battery_full_charge;
+				/* This delta will be negative when charging on
+				 * AC, and possibly also in the case of an SOC
+				 * jump. */
+				hp_drain = info->suspend_capacity_high -
+					capacity_high;
+				if (info->suspend_drain_high ==
+						 DRAIN_HIGH_INVALID)
+					info->suspend_drain_high = 0;
+				info->suspend_drain_high += hp_drain;
+			} else {
+				info->suspend_drain_high = DRAIN_HIGH_INVALID;
+				err = -EIO;
+			}
+		}
+
+		/* Accumulate everything upto here and dump it all at once
+		 * in a format that makes post processing easy, not that it was
+		 * extremely difficult before, but there was too much churn.
+		 *
+		 * Stop dumping into kernel logs, instead put everything in
+		 * amazon_main so it will be saved by Logmanager
+		 *
+		 * All drain logs are in following format ..
+		 *
+		 * drain_metrics: <event>: field1=value1 field2=value2 ....
+		 */
+		if (unlikely(err)) {
+			char buf[128];
+			snprintf(buf, sizeof(buf),
+				"update susp drain fail: err=%d"
+				" suspend_cap=%d suspend_cap_high=%d\n",
+				err, info->suspend_capacity,
+				info->suspend_capacity_high);
+			log_to_amzmain(ANDROID_LOG_ERROR, "bq27x41", buf);
+		} else {
+			char buf[512];
+			int rc;
+
+			snprintf(buf, sizeof(buf),
+				"batt_resume: charge_now=%d charge_full=%d "
+				"charge_now_design=%d charge_full_design=%d\n",
+				info->battery_remaining_charge,
+				info->battery_full_charge,
+				info->battery_remaining_charge_design,
+				info->battery_full_charge_design);
+			log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
+
+			rc = snprintf(buf, sizeof(buf),
+				"suspend_drain: hp_drain=%d elapsed=%ld"
+				" cap_drain=%d cap=%d current=%d voltage=%d"
+				" temp=%d\n",
+				hp_drain, suspend_time, cap_drain,
+				info->battery_capacity,
+				info->battery_current,
+				info->battery_voltage,
+				info->battery_temperature);
+			buf[rc] = '\0';
+			log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
+		}
+#endif
+out:
+		schedule_delayed_work(&info->battery_work,
+				msecs_to_jiffies(info->poll_interval));
+		break;
+	}
+	}
+
+	return 0;
+}
 
 static ssize_t bq27x41_poll_interval_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
@@ -1035,12 +1145,21 @@ static int bq27x41_probe(struct i2c_client *client, const struct i2c_device_id *
 	info->battery_voltage = 3500;
 	info->battery_temperature = 0;
 	info->battery_status = POWER_SUPPLY_STATUS_UNKNOWN;
+	info->battery_health = POWER_SUPPLY_HEALTH_UNKNOWN;
 
 	info->suspend_capacity = -1;
 	info->suspend_capacity_high = -1;
-	info->early_suspend_capacity = -1;
+	info->saved_screen_metrics_capacity = -1;
 
-	bq27x41_read_manufacturer_id(info);
+	/* ACOS_MOD_BEGIN {metrics_log} */
+	/* use error value as initial value */
+	info->suspend_drain = DRAIN_INVALID;
+	info->suspend_drain_high = DRAIN_HIGH_INVALID;
+	/* ACOS_MOD_END {metrics_log} */
+
+	/* Disable charging for unknown battery id */
+	if (bq27x41_read_manufacturer_id(info))
+		info->battery_health = POWER_SUPPLY_HEALTH_DEAD;
 
 	ret = power_supply_register(&client->dev, &info->battery);
 	if (ret) {
@@ -1067,22 +1186,25 @@ static int bq27x41_probe(struct i2c_client *client, const struct i2c_device_id *
 		msecs_to_jiffies(BQ27X41_BATTERY_INTERVAL_EARLY));
 
 #if defined(CONFIG_AMAZON_METRICS_LOG)
-
-#if defined(CONFIG_EARLYSUSPEND)
-	info->early_suspend.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1;
-	info->early_suspend.suspend = bq27x41_early_suspend_cb;
-	info->early_suspend.resume = bq27x41_late_resume_cb;
-	register_early_suspend(&info->early_suspend);
-
-#elif defined(CONFIG_FB)
+#if defined(CONFIG_FB)
 	info->fb_notif.notifier_call = fb_notifier_callback;
 	ret = fb_register_client(&info->fb_notif);
 	if (ret)
 		dev_err(&client->dev, "Unable to register fb_notifier: %d\n",
 			ret);
 #endif
-
 #endif /* defined(CONFIG_AMAZON_METRICS_LOG) */
+
+	info->pm_notify.notifier_call = pm_notifier_callback;
+	ret = register_pm_notifier(&info->pm_notify);
+	if (ret) {
+		dev_err(&client->dev, "Unable to register pm_notifier: %d\n",
+			ret);
+		sysfs_remove_group(&client->dev.kobj, &bq27x41_attrs_group);
+		i2c_set_clientdata(client, NULL);
+		kfree(info);
+		return ret;
+	}
 
 	pr_info("%s: probe succeeded\n", DRIVER_NAME);
 
@@ -1111,52 +1233,20 @@ static void bq27x41_shutdown(struct i2c_client *client)
 static int bq27x41_battery_suspend(struct i2c_client *client, pm_message_t state)
 {
         struct bq27x41_info *info = i2c_get_clientdata(client);
-	int value;
-	int err;
+	char buf[512];
 
-	cancel_delayed_work_sync(&info->battery_work);
-
-	/* Cache the current capacity */
-	info->suspend_capacity = info->battery_capacity;
-
-	info->i2c_err = 0;
-
-	err = bq27x41_battery_read_remaining_charge(&value);
-	if (!err) {
-		info->battery_remaining_charge = value;
-	} else {
-		info->i2c_err++;
+	/* Cancel suspend if battery work is in progress */
+	if (!cancel_delayed_work(&info->battery_work)) {
+		dev_info(&bq27x41_battery_i2c_client->dev,
+			"Battery work in progress, cancel suspend\n");
+		return -1;
 	}
 
-	err = bq27x41_battery_read_full_charge(&value);
-	if (!err) {
-		info->battery_full_charge = value;
-	} else {
-		info->i2c_err++;
-	}
+	if (!info->i2c_err) {
 
-	err = bq27x41_battery_read_remaining_charge_design(&value);
-	if (!err) {
-		info->battery_remaining_charge_design = value;
-	} else {
-		info->i2c_err++;
-	}
+		/* Cache the current capacity */
+		info->suspend_capacity = info->battery_capacity;
 
-	err = bq27x41_battery_read_full_charge_design(&value);
-	if (!err) {
-		info->battery_full_charge_design = value;
-	} else {
-		info->i2c_err++;
-	}
-
-	if (info->i2c_err) {
-		printk(KERN_ERR "bq27x41 battery: "
-			"%d i2c read errors, sysfs entries invalid\n",
-			info->i2c_err);
-		info->i2c_err = 0;
-                info->suspend_capacity_high = -1;
-	} else {
-		char buf[512];
 		/*
 		 * Cache capacity values
 		 */
@@ -1164,20 +1254,32 @@ static int bq27x41_battery_suspend(struct i2c_client *client, pm_message_t state
 			info->battery_remaining_charge * 10000 /
 			info->battery_full_charge;
 
-
+#if defined(CONFIG_AMAZON_METRICS_LOG)
 		/*
 		 * All drain logs will follow following format
 		 * drain_metrics: <event>: field1=value1 field2=value2 ....
 		 */
 
 		snprintf(buf, sizeof(buf),
-				"batt_suspend: charge_now=%d charge_full=%d "
-				"charge_now_design=%d charge_full_design=%d\n",
+			"batt_suspend: charge_now=%d charge_full=%d "
+			"charge_now_design=%d charge_full_design=%d\n",
 			info->battery_remaining_charge,
 			info->battery_full_charge,
 			info->battery_remaining_charge_design,
 			info->battery_full_charge_design);
 		log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
+#endif
+
+	} else {
+		info->suspend_capacity = -1;
+		info->suspend_capacity_high = -1;
+
+#if defined(CONFIG_AMAZON_METRICS_LOG)
+		snprintf(buf, sizeof(buf),
+			"batt_suspend: info->i2c_err=%d\n",
+			info->i2c_err);
+		log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
+#endif
 	}
 
 	/* Mark the suspend time */
@@ -1188,200 +1290,10 @@ static int bq27x41_battery_suspend(struct i2c_client *client, pm_message_t state
 
 static int bq27x41_battery_resume(struct i2c_client *client)
 {
-	int err = 0, value = 0;
 	struct bq27x41_info *info = i2c_get_clientdata(client);
-	int cap_drain, hp_drain;
-#if defined(CONFIG_AMAZON_METRICS_LOG)
-	struct timespec diff;
-	long suspend_time;
-#endif
-	/*
-	 * Check for the battery current
-	 */
-	err += bq27x41_battery_read_current(&value);
 
-	if (!err) {
-		info->battery_current = value;
-		info->i2c_err = 0;
-	} else {
-		info->i2c_err++;
-	}
-	/*
-	 * Check for the battery voltage
-	 */
-	err += bq27x41_battery_read_voltage(&value);
-
-	if (!err) {
-		info->battery_voltage = value;
-		info->i2c_err = 0;
-	} else {
-		info->i2c_err++;
-	}
-
-	/*
-	 * Check for remaining charge
-	 */
-	err += bq27x41_battery_read_remaining_charge(&value);
-
-	if (!err) {
-		info->battery_remaining_charge = value;
-		info->i2c_err = 0;
-	} else {
-		info->i2c_err++;
-	}
-
-	/*
-	 * Check for full battery mAH
-	 */
-	err += bq27x41_battery_read_full_charge(&value);
-
-	if (!err) {
-		info->battery_full_charge = value;
-		info->i2c_err = 0;
-	} else {
-		info->i2c_err++;
-	}
-
-	/*
-	 * Check for remaining charge (uncompensated)
-	 */
-	err += bq27x41_battery_read_remaining_charge_design(&value);
-
-	if (!err) {
-		info->battery_remaining_charge_design = value;
-		info->i2c_err = 0;
-	} else {
-		info->i2c_err++;
-	}
-
-	/*
-	 * Read the gas gauge capacity
-	 */
-	err += bq27x41_battery_read_capacity(&value);
-
-	if (!err) {
-		info->battery_capacity = value;
-		info->i2c_err = 0;
-	} else {
-		info->i2c_err++;
-	}
-
-	/*
-	 * Check for battery temperature
-	 */
-	err += bq27x41_battery_read_temperature(&value);
-
-	if (!err) {
-		info->battery_temperature = value;
-		info->i2c_err = 0;
-	} else {
-		info->i2c_err++;
-	}
-
-	err = bq27x41_battery_read_remaining_charge_design(&value);
-	if (!err) {
-		info->battery_remaining_charge_design = value;
-	} else {
-		info->i2c_err++;
-	}
-
-	err = bq27x41_battery_read_full_charge_design(&value);
-	if (!err) {
-		info->battery_full_charge_design = value;
-	} else {
-		info->i2c_err++;
-	}
-
-	/* Report to upper layers */
-	power_supply_changed(&info->battery);
-
-#if defined(CONFIG_AMAZON_METRICS_LOG)
-	if (info->battery_status == POWER_SUPPLY_STATUS_CHARGING)
-		goto skip_metrics;
-
-	/* Compute elapsed time and determine suspend drainage */
-	diff = timespec_sub(current_kernel_time(), info->suspend_time);
-	suspend_time = diff.tv_sec * 1000 + diff.tv_nsec / NSEC_PER_MSEC;
-	info->suspend_realtime += diff.tv_sec;
-
-	if (likely(!err)) {
-		if (info->suspend_capacity >= 0) {
-			cap_drain = info->suspend_capacity -
-				info->battery_capacity;
-			info->suspend_drain += cap_drain;
-		}
-
-		if (info->suspend_capacity_high >= 0) {
-			int capacity_high =
-				info->battery_remaining_charge * 10000 /
-				info->battery_full_charge;
-			/* This delta will be negative when charging on AC, and
-			 * possibly also in the case of an SOC jump. */
-			hp_drain = info->suspend_capacity_high - capacity_high;
-			info->suspend_drain_high += hp_drain;
-		} else {
-			/* Re-setting this to -1 now, so it's a copy of the
-			 * original code. IMHO, we should not touch the
-			 * suspend_drain_high at all if we fail due to i2c
-			 * read errors so battery stats can continue from where
-			 * it left of. This will skew our suspend drain metrics
-			 * in case of i2c errors - SSP
-			 */
-			info->suspend_drain_high = -1;
-			err = -EIO;
-		}
-	}
-
-	/* Accumulate everything upto here and dump it all at once
-	 * in a format that makes post processing easy, not that it was
-	 * extremely difficult before, but there was too much churn.
-	 *
-	 * Also, stop dumping into kernel logs, instead put everything in
-	 * amazon_main so it will be saved by Logmanager
-	 *
-	 * All drain logs are in following format ..
-	 *
-	 * drain_metrics: <event>: field1=value1 field2=value2 ....
-	 */
-	if (unlikely(err)) {
-		char buf[128];
-		snprintf(buf, sizeof(buf),
-			"update susp drain fail: err=%d"
-			"suspend_cap=%d suspend_cap_high=%d\n",
-			err, info->suspend_capacity,
-			info->suspend_capacity_high);
-		log_to_amzmain(ANDROID_LOG_ERROR, "bq27x41", buf);
-	} else {
-		char buf[512];
-		int rc;
-
-		snprintf(buf, sizeof(buf),
-				"batt_resume: charge_now=%d charge_full=%d "
-				"charge_now_design=%d charge_full_design=%d\n",
-			info->battery_remaining_charge,
-			info->battery_full_charge,
-			info->battery_remaining_charge_design,
-			info->battery_full_charge_design);
-		log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
-
-		rc = snprintf(buf, sizeof(buf),
-				"suspend_drain: hp_drain=%d elapsed=%ld"
-				" cap_drain=%d cap=%d current=%d voltage=%d"
-				" temp=%d\n",
-				hp_drain, suspend_time, cap_drain,
-				info->battery_capacity,
-				info->battery_current,
-				info->battery_voltage,
-				info->battery_temperature);
-		buf[rc] = '\0';
-		log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
-	}
-
-skip_metrics:
-#endif
-
-	schedule_delayed_work(&info->battery_work,
-		msecs_to_jiffies(info->poll_interval));
+	/* Mark the resume time */
+	info->resume_time = current_kernel_time();
 
 	return 0;
 }
@@ -1396,7 +1308,7 @@ static const struct of_device_id bq27x41_match[] = {
 static struct i2c_driver bq27x41_i2c_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
-		.of_match_table = of_match_ptr(bq27x41_match),
+		.of_match_table = bq27x41_match,
 	},
 	.probe = bq27x41_probe,
 	.remove = bq27x41_remove,

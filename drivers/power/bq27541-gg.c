@@ -483,7 +483,7 @@ enum {
  * @status.limits.volt_hi_mv:	overides GG BATHI
  * @status.limits.volt_lo_mv:	overides GG BATLOW
  * @status.limits.temp_hi_shutdown_dk: temp to immediate shutdown
- * @status.limits.volt_lo_shutdown_mv: voltage to orderly shutdowm
+ * @status.limits.volt_shutdown_margin_mv: voltage margin to orderly shutdowm
  * @status.snapshot.next:	wall seconds for next snapshot
  * @status.snapshot.seconds:	snapshot period
  * @charge_monitor.charging:	current charging state
@@ -623,7 +623,7 @@ struct bq27541_chip {
 			int		volt_hi_mv;
 			int		volt_lo_mv;
 			int		temp_hi_shutdown_dk;
-			int		volt_lo_shutdown_mv;
+			int		volt_shutdown_margin_mv;
 		} limits;
 		struct {
 			unsigned long	next;
@@ -755,7 +755,7 @@ static int bq27541_parse_decode_dec(char ** ptr, unsigned long * value)
 	return count;
 }
 
-static int bq27541_find_device_cb(struct device *dev, /*const*/ void *name) { return 1; }
+static int bq27541_find_device_cb(struct device *dev, const void *name) { return 1; }
 static struct rtc_device * bq27541_get_rtc(struct bq27541_chip * chip)
 {
 	if (!chip->rtc) {
@@ -1875,7 +1875,7 @@ static ssize_t bq27541_procfs_fs_write(struct file * file,
 
 static int bq27541_procfs_fs_open(struct inode * inode, struct file * file)
 {
-	struct bq27541_chip * chip = PDE(inode)->data;
+	struct bq27541_chip * chip = PDE_DATA(inode);
 	file->private_data = chip;
 
 	cancel_delayed_work(&chip->status.work);
@@ -1893,7 +1893,7 @@ static int bq27541_procfs_fs_open(struct inode * inode, struct file * file)
 
 static int bq27541_procfs_fs_release(struct inode * inode, struct file * file)
 {
-	struct bq27541_chip * chip = PDE(inode)->data;
+	struct bq27541_chip * chip = PDE_DATA(inode);
 
 	while (chip->flashstream.writing) msleep(250);
 	if (chip->flashstream.written) {
@@ -1951,7 +1951,7 @@ static int bq27541_procfs_status_read(struct seq_file * seq, void * offset)
 
 static int bq27541_procfs_status_open(struct inode * inode, struct file * file)
 {
-	return single_open(file, bq27541_procfs_status_read, PDE(inode)->data);
+	return single_open(file, bq27541_procfs_status_read, PDE_DATA(inode));
 }
 
 static struct file_operations bq27541_procfs_status_fops = {
@@ -2013,7 +2013,7 @@ static int bq27541_procfs_config_read(struct seq_file * seq, void * offset)
 
 static int bq27541_procfs_config_open(struct inode * inode, struct file * file)
 {
-	return single_open(file, bq27541_procfs_config_read, PDE(inode)->data);
+	return single_open(file, bq27541_procfs_config_read, PDE_DATA(inode));
 }
 
 static struct file_operations bq27541_procfs_config_fops = {
@@ -2118,7 +2118,7 @@ static int bq27541_procfs_dfd_write(struct file * file,
 
 static int bq27541_procfs_dfd_open(struct inode * inode, struct file * file)
 {
-	return single_open(file, bq27541_procfs_dfd_read, PDE(inode)->data);
+	return single_open(file, bq27541_procfs_dfd_read, PDE_DATA(inode));
 }
 
 static struct file_operations bq27541_procfs_dfd_fops = {
@@ -2196,7 +2196,7 @@ static int bq27541_procfs_sealed_write(struct file * file,
 
 static int bq27541_procfs_sealed_open(struct inode * inode, struct file * file)
 {
-	return single_open(file, bq27541_procfs_sealed_read, PDE(inode)->data);
+	return single_open(file, bq27541_procfs_sealed_read, PDE_DATA(inode));
 }
 
 static struct file_operations bq27541_procfs_sealed_fops = {
@@ -2269,7 +2269,7 @@ static int bq27541_procfs_data_write(struct file * file,
 
 static int bq27541_procfs_data_open(struct inode * inode, struct file * file)
 {
-	return single_open(file, bq27541_procfs_data_read, PDE(inode)->data);
+	return single_open(file, bq27541_procfs_data_read, PDE_DATA(inode));
 }
 
 static struct file_operations bq27541_procfs_data_fops = {
@@ -2309,7 +2309,7 @@ static int bq27541_procfs_help_read(struct seq_file *seq, void *offset)
 
 static int bq27541_procfs_help_open(struct inode * inode, struct file * file)
 {
-	return single_open(file, bq27541_procfs_help_read, PDE(inode)->data);
+	return single_open(file, bq27541_procfs_help_read, PDE_DATA(inode));
 }
 
 static struct file_operations bq27541_procfs_help_fops = {
@@ -2376,7 +2376,7 @@ static ssize_t bq27541_procfs_stats_write(struct file * file,
 
 static int bq27541_procfs_stats_open(struct inode * inode, struct file * file)
 {
-	return single_open(file, bq27541_procfs_stats_read, PDE(inode)->data);
+	return single_open(file, bq27541_procfs_stats_read, PDE_DATA(inode));
 }
 
 static struct file_operations bq27541_procfs_stats_fops = {
@@ -3055,13 +3055,8 @@ static void bq27541_update_status(struct bq27541_chip * chip)
 	 * For smoothing, simply wait for <n+> consecutive readings below
 	 * shutoff, then declare 0% SOC.
 	 */
-	/**
-	 * Addendum: No longer override the GG SOC at 0%. Doing so allowed low
-	 * loads to fully deplete the cell, but a high load to trip the lower
-	 * guard limit, bypassing graceful shut down.
-	 * if (soc == 0) soc = 1;
-	 * if (vsoc == 0) vsoc = 1;
-	 */
+	if (soc == 0) soc = 1;
+	if (vsoc == 0) vsoc = 1;
 	if (vbat >= bq27541_get_shutoff_mv(chip)) {
 		chip->status.zero_soc_count = 0;
 	} else if (chip->status.zero_soc_count++ >=
@@ -3089,7 +3084,7 @@ static void bq27541_update_status(struct bq27541_chip * chip)
 	/* High temperature charge termination check.
 	 * If warm_charge_done is true, and (Tbat < 44degC or soc <=
 	 * warm_charge_resume_soc), then clear warm_charge_done.
-	 * If warm_charge_done is false, and (Tbat >= 45degC and Vbat > 4040mv
+	 * If warm_charge_done is false, and (Tbat >= 45degC and Vbat > 4140mv
 	 * and Ibat < 100ma), for <n> consecutive samples, then
 	 * set warm_charge_done. Also, set warm_charge_resume_soc to SOC - 3.
 	 * Reflect warm_charge_done as POWER_SUPPLY_HEALTH_OVERVOLTAGE, which
@@ -3506,9 +3501,10 @@ static int bq27541_check_limits(struct bq27541_chip * chip, int status_delta)
 	}
 
 	// check voltage - orderly shutdown if exceeded
-	if (chip->status.limits.volt_lo_shutdown_mv) {
+	if (chip->status.limits.volt_shutdown_margin_mv) {
 		int volt = bq27541_get_status(chip, BATT_STATUS_VOLTAGE);
-		if (volt < chip->status.limits.volt_lo_shutdown_mv) {
+		if (volt < (bq27541_get_shutoff_mv(chip) -
+				chip->status.limits.volt_shutdown_margin_mv)) {
 			char buf[128];
 			bq27541_snapshot(chip);
 			snprintf(buf, sizeof(buf),
@@ -3917,7 +3913,7 @@ static int bq27541_init_context(struct bq27541_chip * chip)
 	chip->status.limits.volt_hi_mv = 0;
 	chip->status.limits.volt_lo_mv = 0;
 	chip->status.limits.temp_hi_shutdown_dk = 0;
-	chip->status.limits.volt_lo_shutdown_mv = 0;
+	chip->status.limits.volt_shutdown_margin_mv = 0;
 
 	if (dnp) {
 		struct device_node *n = of_find_node_by_path("/idme/bootmode");
@@ -3978,8 +3974,8 @@ static int bq27541_init_context(struct bq27541_chip * chip)
 				&chip->status.limits.volt_lo_mv);
 		of_property_read_u32(dnp, "ursa,limit-temp-hi-shutdown-dk",
 				&chip->status.limits.temp_hi_shutdown_dk);
-		of_property_read_u32(dnp, "ursa,limit-volt-lo-shutdown-mv",
-				&chip->status.limits.volt_lo_shutdown_mv);
+		of_property_read_u32(dnp, "ursa,limit-volt-shutdown-margin-mv",
+				&chip->status.limits.volt_shutdown_margin_mv);
 	}
 
 	chip->status.cache.fcc = chip->status.mib.capacity_mah;
@@ -4012,7 +4008,7 @@ enum {
 	BQ27541_DA_PMIC_SNAPSHOT,
 	BQ27541_DA_BOOTMODE,
 	BQ27541_DA_TEMP_HI_SHUTDOWN,
-	BQ27541_DA_VOLT_LO_SHUTDOWN,
+	BQ27541_DA_VOLT_SHUTDOWN_MARGIN,
 	BQ27541_DA_BATTERY_ID,
 	BQ27541_DA_SHUTOFF_MV,
 	BQ27541_DA_ALT_SHUTOFF_MV,
@@ -4073,8 +4069,8 @@ static ssize_t bq27541_show_attr(struct device *dev,
 	case BQ27541_DA_TEMP_HI_SHUTDOWN:
 		value = chip->status.limits.temp_hi_shutdown_dk;
 		break;
-	case BQ27541_DA_VOLT_LO_SHUTDOWN:
-		value = chip->status.limits.volt_lo_shutdown_mv;
+	case BQ27541_DA_VOLT_SHUTDOWN_MARGIN:
+		value = chip->status.limits.volt_shutdown_margin_mv;
 		break;
 	case BQ27541_DA_BATTERY_ID:
 		value = chip->status.info.battery_id;
@@ -4156,8 +4152,8 @@ static ssize_t bq27541_set_attr(struct device *dev,
 	case BQ27541_DA_TEMP_HI_SHUTDOWN:
 		chip->status.limits.temp_hi_shutdown_dk = value;
 		break;
-	case BQ27541_DA_VOLT_LO_SHUTDOWN:
-		chip->status.limits.volt_lo_shutdown_mv = value;
+	case BQ27541_DA_VOLT_SHUTDOWN_MARGIN:
+		chip->status.limits.volt_shutdown_margin_mv = value;
 		break;
 	case BQ27541_DA_BATTERY_ID:
 		chip->status.info.battery_id = value;
@@ -4204,7 +4200,7 @@ BQ27541_ATTRIBUTE(suppress_errors, BQ27541_DA_SUPPRESS_ERRORS)
 BQ27541_ATTRIBUTE(pmic_snapshot, BQ27541_DA_PMIC_SNAPSHOT)
 BQ27541_ATTRIBUTE(bootmode, BQ27541_DA_BOOTMODE)
 BQ27541_ATTRIBUTE(temp_hi_shutdown, BQ27541_DA_TEMP_HI_SHUTDOWN)
-BQ27541_ATTRIBUTE(volt_lo_shutdown, BQ27541_DA_VOLT_LO_SHUTDOWN)
+BQ27541_ATTRIBUTE(volt_shutdown_margin, BQ27541_DA_VOLT_SHUTDOWN_MARGIN)
 BQ27541_ATTRIBUTE(battery_id, BQ27541_DA_BATTERY_ID)
 BQ27541_ATTRIBUTE(shutoff_mv, BQ27541_DA_SHUTOFF_MV)
 BQ27541_ATTRIBUTE(alt_shutoff_mv, BQ27541_DA_ALT_SHUTOFF_MV)
@@ -4228,7 +4224,7 @@ static void bq27541_create_attributes(struct bq27541_chip * chip)
 	device_create_file(chip->dev, &dev_attr_pmic_snapshot);
 	device_create_file(chip->dev, &dev_attr_bootmode);
 	device_create_file(chip->dev, &dev_attr_temp_hi_shutdown);
-	device_create_file(chip->dev, &dev_attr_volt_lo_shutdown);
+	device_create_file(chip->dev, &dev_attr_volt_shutdown_margin);
 	device_create_file(chip->dev, &dev_attr_battery_id);
 	device_create_file(chip->dev, &dev_attr_shutoff_mv);
 	device_create_file(chip->dev, &dev_attr_alt_shutoff_mv);

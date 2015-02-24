@@ -18,23 +18,27 @@
 #include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/timer.h>
-#include <linux/sysdev.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/power_supply.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/of_regulator.h>
+#include <linux/regulator/machine.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/workqueue.h>
+#include <linux/qpnp/power-on.h>
+#include <linux/wakelock.h>
+
 #ifdef CONFIG_AMAZON_METRICS_LOG
 #include <linux/metricslog.h>
 #define METRICS_STR_LEN 128
 #endif
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-#include "battery_bq27x41.h"
-#endif
+
 #define SMB349_I2C_ADDRESS	0x5F
 
 #define DRIVER_NAME			"smb349"
@@ -84,6 +88,9 @@
 #define SMB349_CHG_TIMEOUT_MED  0x04
 #define SMB349_CHG_TIMEOUT_MIN  0x00
 
+#define SMB349_FUNCTIONS_APSD_EN_MASK	0x04
+#define SMB349_FUNCTIONS_AICL_EN_MASK	0x10
+
 #define SMB349_IS_APSD_DONE(value)	((value) & (1 << 6))
 #define SMB349_IS_POWER_OK(value) ((value) & (1 << 0))
 
@@ -112,12 +119,22 @@
 #define SMB349_IS_AICL_DONE(value)	((value) & (1 << 4))
 
 #define SMB349_AICL_RESULT(value)	((value) & 0xf)
-#define SMB349_USBCS_CONTROL		(1<<4)
+
 #define SMB349_THERMAL_CONTROL_MONITOR	(1<<4)
 #define SMB349_ENABLE_CHG_FAULT_IRQ	(1<<2)
 
+#define SMB349_EN_CTRL_MASK		(0x60)
+#define SMB349_USBCS_EN_CTRL_MASK	(0x10)
+#define SMB349_COMMAND_A_CHRG_EN	(1<<1)
+#define SMB349_COMMAND_A_OTG_EN        (1<<4)
+#define SMB349_OTG_CUR_LIMIT_MASK	(0x0c)
+#define SMB349_DEFAULT_CUR_LIMIT	(1000)
+#define SMB349_OVERCURRENT_IRQ	(1<<7)
+
 #define SMB349_INTSTAT_A_HOT_HARD		(1<<7)
 #define SMB349_INTSTAT_A_COLD_HARD		(1<<5)
+#define SMB349_INTSTAT_A_COLD_SOFT		(1<<1)
+#define SMB349_INTSTAT_A_COLD_SOFT_STATUS	(1<<0)
 #define SMB349_INTSTAT_B_BATT_OV		(1<<7)
 #define SMB349_INTSTAT_B_BATT_MISSING		(1<<5)
 #define SMB349_INTSTAT_B_BATT_LV		(1<<3)
@@ -128,21 +145,20 @@
 #define SMB349_INTSTAT_E_UV			(1<<1)
 #define SMB349_INTSTAT_E_UV_STATUS		(1<<0)
 
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-static bool charging_started;
-enum {
-	DEFAULT_CHARGE_MODE,
-	CHARGE_900MA_410V,
-	CHARGE_500MA_435V,
-};
-static int charge_mode;
-#define CHR_CHK_INTERVAL   30000
-#endif
+#define SMB349_FLOAT_VOLTAGE_MIN	346
+#define SMB349_FLOAT_VOLTAGE_MAX	472
+#define SMB349_FLOAT_VOLTAGE_MASK	0x3F
+
 
 enum {
 	SMB349_USB_MODE_1,
 	SMB349_USB_MODE_5,
 	SMB349_USB_MODE_HC,
+};
+
+struct smb349_regulator {
+       struct regulator_desc   rdesc;
+       struct regulator_dev    *rdev;
 };
 
 struct smb349_priv {
@@ -151,29 +167,37 @@ struct smb349_priv {
 	struct power_supply ac;
 	struct power_supply usb;
 	struct power_supply *dwc3_usb;
+	struct power_supply *bq27x41;
 	atomic_t usb_online;
 	atomic_t ac_online;
 	struct mutex lock;
 	struct delayed_work irq_work;
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
 	struct delayed_work charge_work;
-#endif
-	struct work_struct fixup_work;
+	struct delayed_work otg_work;
 #ifdef CONFIG_AMAZON_METRICS_LOG
 	struct work_struct disconnect_log_work;
 #endif
-	unsigned chrg_stat;
-	unsigned chrg_en;
-	unsigned chrg_hcs;
+	struct smb349_regulator otg_vreg;
+	struct smb349_regulator apsd_ctrl;
+	int apsd_disabled;
+	int chrg_stat;
+	int chrg_en;
+	int apsd_trigger;
+	int chrg_hcs;
+        int chrg_susp;
 	int bad_battery;
 	int chg_health;
 	int current_limit;
-	unsigned usb_boot_det;
+	int otg_current_limit;
+	int otg_enabled;
+	int usb_boot_det;
 	int polling_mode;
+	int charge_mode;
 	int irq;
 
 	atomic_t suspended;
 	int handle_irq;
+	struct wake_lock irq_wake_lock;
 };
 /* DEBUG */
 //#define SMB349_DEBUG
@@ -182,6 +206,22 @@ struct smb349_priv {
 extern int pm_wake_lock(const char *string);
 extern int pm_wake_unlock(const char *string);
 #endif
+
+static int smb349_APSD_enable(struct smb349_priv *chip, int enable);
+static int smb349_modify_charge_current(struct smb349_priv *priv,
+					int fast_charge_current,
+					int precharge_current);
+static int smb349_get_current_limit_index(int limit);
+
+#define FLOAT_VOLTAGE_NORMAL 4350000
+#define FLOAT_VOLTAGE_COLD   4100000
+#define FLOAT_VOLTAGE_MIN    3000000
+
+enum {
+	CHARGE_MODE_NORMAL,
+	CHARGE_MODE_900MA_435V,
+	CHARGE_MODE_500MA_435V,
+};
 
 /*
  * FIXME
@@ -202,6 +242,10 @@ static const int smb349_aicl_results[] = {
 				1200, 1300, 1500, 1600,
 				1700, 1800, 2000, 2200,
 				2400, 2500, 3000, 3500
+			};
+
+static const int smb349_otg_current_limits[] = {
+				250, 500, 750, 1000
 			};
 
 static const int smb349_fast_charge_currents[] = {
@@ -227,6 +271,24 @@ static int smb349_i2c_write(struct i2c_client *client,
 			u8 reg_num, u8 value);
 
 static int smb349_change_current_limit(struct smb349_priv *priv, int idx);
+
+static int apsd_triggered = 0;
+static void enable_apsd_trigger(struct smb349_priv *priv)
+{
+	if (priv->apsd_trigger == -1) {
+		dev_err(priv->dev, "Wave generate gpio is not ready.\n");
+		return;
+	}
+	gpio_set_value(priv->apsd_trigger, 1);
+	msleep(30);
+	gpio_set_value(priv->apsd_trigger, 0);
+
+	msleep(25);
+
+	gpio_set_value(priv->apsd_trigger, 1);
+	msleep(30);
+	gpio_set_value(priv->apsd_trigger, 0);
+}
 
 static const char *smb349_apsd_result_string(u8 value)
 {
@@ -294,6 +356,9 @@ static int smb349_config(struct smb349_priv *priv, int enable)
 	int ret = 0;
 	unsigned char value = 0xff;
 
+	if (!priv->i2c_client)
+		return -EINVAL;
+
 	if ((ret = smb349_i2c_read(priv->i2c_client,
 			SMB349_COMMAND_REG_A, &value))) {
 		dev_err(priv->dev,
@@ -322,6 +387,110 @@ done:
 	return ret;
 }
 
+static int smb349_set_float_voltage(struct smb349_priv *priv, int value)
+{
+	int ret = -1;
+	u8 reg_value = 0xff;
+	int fv_value = 0;
+
+	/* convert to decivolts from microvolts */
+	value = value/10000;
+
+	if ((value > SMB349_FLOAT_VOLTAGE_MAX) ||
+		(value < SMB349_FLOAT_VOLTAGE_MIN)) {
+		dev_err(priv->dev, "Invalid float voltage value: %d\n",
+			value);
+		return ret;
+	}
+
+	mutex_lock(&priv->lock);
+	if (smb349_config(priv, 1)) {
+		dev_err(priv->dev,
+			"Unable to enable writes to CONFIG regs\n");
+		goto done;
+	}
+
+	ret = smb349_i2c_read(priv->i2c_client,
+		SMB349_FLOAT_VOLTAGE, &reg_value);
+	if (ret) {
+		dev_err(priv->dev,
+			"%s: Unable to read SMB349_FLOAT_VOLTAGE: %d\n",
+			__func__, ret);
+		goto done;
+	}
+
+	fv_value = (value - SMB349_FLOAT_VOLTAGE_MIN) / 2;
+
+	reg_value &= ~SMB349_FLOAT_VOLTAGE_MASK;
+	reg_value |= (fv_value & SMB349_FLOAT_VOLTAGE_MASK);
+
+	dev_info(priv->dev, "Setting float voltage to 0x%02x\n", reg_value);
+
+	ret = smb349_i2c_write(priv->i2c_client,
+		SMB349_FLOAT_VOLTAGE, reg_value);
+
+done:
+	if (smb349_config(priv, 0)) {
+		dev_err(priv->dev,
+			"Unable to enable writes to CONFIG regs\n");
+		goto done;
+	}
+	mutex_unlock(&priv->lock);
+	return ret;
+}
+
+static int smb349_otg_current_limit(struct smb349_priv *priv, int limit)
+{
+	int ret = -1;
+	u8 value = 0xff;
+	int i;
+
+	if (smb349_config(priv, 1)) {
+		dev_err(priv->dev,
+			"Unable to enable writes to CONFIG regs\n");
+		goto done;
+	}
+
+	ret = smb349_i2c_read(priv->i2c_client,
+			SMB349_OTG_THERM_CONTROL, &value);
+	if (ret) {
+		dev_err(priv->dev,
+			"%s: Unable to read SMB349_OTG_THERM_CONTROL: %d\n",
+			__FUNCTION__, ret);
+		goto done;
+	}
+
+	/* Locate the first smaller otg current limit */
+	for (i = ARRAY_SIZE(smb349_otg_current_limits) - 1; i >= 1; i--)
+		if (smb349_otg_current_limits[i] <= limit)
+			break;
+
+	dev_info(priv->dev, "Change otg_current_limit to [%d]\n", smb349_otg_current_limits[i]);
+
+	value &= ~SMB349_OTG_CUR_LIMIT_MASK;
+	value |= (i << 2);
+
+	ret = smb349_i2c_write(priv->i2c_client,
+			SMB349_OTG_THERM_CONTROL, value);
+	if (ret) {
+		dev_err(priv->dev,
+			"%s: Unable to write SMB349_OTG_THERM_CONTROL: %d\n",
+			__FUNCTION__, ret);
+		goto done;
+	}
+
+	priv->otg_current_limit =  smb349_otg_current_limits[i];
+
+
+	if (smb349_config(priv, 0)) {
+		dev_err(priv->dev,
+			"Unable to enable writes to CONFIG regs\n");
+		goto done;
+	}
+done:
+	return ret;
+}
+
 static int smb349_fast_charge_current_limit(struct smb349_priv *priv)
 {
 	int ret = -1;
@@ -341,17 +510,11 @@ static int smb349_fast_charge_current_limit(struct smb349_priv *priv)
 		goto done;
 	}
 
-#ifdef CONFIG_AMAZON_METRICS_LOG
-	{
-		char buf[METRICS_STR_LEN];
+	dev_info(priv->dev, "Fast charge current limit = %d mA, "
+			"Input Current Limit = %d mA",
+			smb349_fast_charge_currents[value >> 4],
+			smb349_input_current_limits[value & 0xf]);
 
-		snprintf(buf, sizeof(buf),
-			"smb349:def:current_limit=%d;CT;1:NR",
-			smb349_fast_charge_currents[value >> 4]);
-
-		log_to_metrics(ANDROID_LOG_INFO, "charger", buf);
-	}
-#endif
 	if (smb349_config(priv, 0)) {
 		dev_err(priv->dev,
 			"Unable to enable writes to CONFIG regs\n");
@@ -364,6 +527,7 @@ done:
 static int smb349_config_fixup(struct smb349_priv *priv)
 {
 	int ret = -1, i = 0;
+#if defined(CONFIG_ARCH_MSM8974_THOR) || defined(CONFIG_ARCH_MSM8974_APOLLO)
 	int fixup_values[] = {
 		-1, -1, -1, -1,
 		-1, -1, -1, -1,
@@ -371,6 +535,15 @@ static int smb349_config_fixup(struct smb349_priv *priv)
 		0x07, 0xa3, -1,   -1,
 		-1
 	};
+#else
+	int fixup_values[] = {
+		-1,     -1,   -1,   -1,
+		-1,     -1, 0x7a,   0xc3,
+		-1,     -1,   -1, 0xa1,
+		0x57, 0xa3,   -1,   -1,
+		-1
+	};
+#endif
 
 	u8 value = 0xff;
 
@@ -416,6 +589,13 @@ done:
 			"Unable to enable writes to CONFIG regs\n");
 		ret = -1;
 	}
+
+	/* Make sure that APSD is still disabled */
+	if (priv->apsd_disabled) {
+		smb349_APSD_enable(priv, 0);
+	}
+
+	priv->charge_mode = CHARGE_MODE_NORMAL;
 
 	/* Set the appropriate fast charge current limit */
 	smb349_fast_charge_current_limit(priv);
@@ -500,7 +680,6 @@ static int smb349_switch_mode(struct smb349_priv *priv, int mode)
 			__FUNCTION__, ret);
 		goto done;
 	} else {
-		dev_warn(priv->dev,	"%s: SMB349_COMMAND_REG_B before updating is== %02x\n", __FUNCTION__, value);
 		switch (mode) {
 		case SMB349_USB_MODE_1:
 			dev_info(priv->dev, "Switching to USB1 mode\n");
@@ -528,16 +707,7 @@ static int smb349_switch_mode(struct smb349_priv *priv, int mode)
 				__FUNCTION__, ret);
 			goto done;
 		}
-		if ((ret = smb349_i2c_read(priv->i2c_client,
-				SMB349_COMMAND_REG_B, &value))) {
-			dev_err(priv->dev,
-				"%s: Unable to read SMB349_COMMAND_REG_B: %d\n",
-				__FUNCTION__, ret);
-			goto done;
-			} else {
-					dev_warn(priv->dev, "%s: SMB349_COMMAND_REG_B After updating is== %02x\n",
-						__FUNCTION__, value);
-				}
+
 		ret = 0;
 	}
 
@@ -550,9 +720,7 @@ static void smb349_apsd_complete(struct smb349_priv *priv)
 	u8 value = 0xff;
 	int ret = -1;
 	int type = POWER_SUPPLY_TYPE_USB;
-#ifdef CONFIG_AMAZON_METRICS_LOG
-	char metrics_buf[METRICS_STR_LEN];
-#endif
+
 	mutex_lock(&priv->lock);
 
 	ret = smb349_i2c_read(priv->i2c_client, SMB349_STATUS_REG_D, &value);
@@ -594,11 +762,11 @@ static void smb349_apsd_complete(struct smb349_priv *priv)
 		} else {
 			type = POWER_SUPPLY_TYPE_USB;
 		}
-#ifdef CONFIG_AMAZON_METRICS_LOG
-		snprintf(metrics_buf, sizeof(metrics_buf),
-			"smb349:def:usb_connected=1;CT;1:NR");
-		log_to_metrics(ANDROID_LOG_INFO, "charger", metrics_buf);
-#endif
+		if (!apsd_triggered) {
+			apsd_triggered = 1;
+			enable_apsd_trigger(priv);
+		}
+
 		break;
 	case SMB349_APSD_RESULT_DCP:
 	case SMB349_APSD_RESULT_OTHER:
@@ -612,22 +780,16 @@ static void smb349_apsd_complete(struct smb349_priv *priv)
 
 		type = POWER_SUPPLY_TYPE_USB_DCP;
 
+		if (!apsd_triggered) {
+			apsd_triggered = 1;
+			enable_apsd_trigger(priv);
+		}
+
 		break;
 	default:
-#ifdef CONFIG_AMAZON_METRICS_LOG
-		if (atomic_read(&priv->usb_online)) {
-			snprintf(metrics_buf, sizeof(metrics_buf),
-			"smb349:def:usb_disconnected=1;CT;1:NR");
-			log_to_metrics(ANDROID_LOG_INFO, "charger",
-						metrics_buf);
-		}
-#endif
 		atomic_set(&priv->ac_online, 0);
 		atomic_set(&priv->usb_online, 0);
 
-#if defined(CONFIG_PM_WAKELOCKs)
-		pm_wake_unlock("smb349");
-#endif
 		break;
 	}
 
@@ -642,186 +804,6 @@ static void smb349_apsd_complete(struct smb349_priv *priv)
 	mutex_unlock(&priv->lock);
 
 	return;
-}
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-static ssize_t smb349_set_float_voltage(struct smb349_priv *priv, int value)
-{
-	int ret = -1;
-	u8 reg_value = 0xff;
-	int fv_value = 0;
-
-	if ((value > 472) || (value < 346)) {
-		dev_err(priv->dev, "Wrong value, the value must be 346 ~ 472\n");
-		return ret;
-	}
-
-	mutex_lock(&priv->lock);
-	if (smb349_config(priv, 1)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-	msleep(200);
-	ret = smb349_i2c_read(priv->i2c_client,
-		SMB349_FLOAT_VOLTAGE, &reg_value);
-	if (ret) {
-		dev_err(priv->dev,
-			"%s: Unable to read SMB349_FLOAT_VOLTAGE: %d\n",
-			__func__, ret);
-		goto done;
-	}
-	msleep(200);
-	fv_value = (value - 346)/2;
-
-	reg_value &= 0xC0;
-	reg_value |= fv_value;
-
-	msleep(200);
-	ret = smb349_i2c_write(priv->i2c_client,
-		SMB349_FLOAT_VOLTAGE, reg_value);
-
-	if (smb349_config(priv, 1)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-
-	if (smb349_config(priv, 0)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-done:
-	if (smb349_config(priv, 0)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-	mutex_unlock(&priv->lock);
-	return ret;
-}
-
-static int smb349_set_current_limit(struct smb349_priv *priv, int idx)
-{
-	int ret = -1;
-	const int aicl_disable_val = 0xa7;
-	const int aicl_enable_val = 0xb7;
-	unsigned char value = 0xff;
-
-	if (smb349_config(priv, 1)) {
-		dev_err(priv->dev, "Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-
-	/* Adjust input current limit */
-	ret = smb349_i2c_read(priv->i2c_client, SMB349_CURRENT_LIMIT, &value);
-	if (ret) {
-		dev_err(priv->dev,
-				"%s: Unable to read SMB349_CURRENT_LIMIT: %d\n",
-				__func__, ret);
-		goto done;
-	}
-
-	priv->current_limit = smb349_input_current_limits[idx];
-	value &= ~0x0f;
-	value |= idx;
-
-	ret = smb349_i2c_write(priv->i2c_client, SMB349_CURRENT_LIMIT, value);
-	if (ret) {
-		dev_err(priv->dev,
-				"%s: Unable to write SMB349_CURRENT_LIMIT: %d\n",
-				__func__, ret);
-		goto done;
-	}
-	msleep(200);
-
-	/* Disable AICL */
-	ret = smb349_i2c_write(priv->i2c_client,
-			SMB349_FUNCTIONS, aicl_disable_val);
-	if (ret) {
-		dev_err(priv->dev,
-				"%s: Unable to write to reg %02x: %d\n",
-				__func__, SMB349_FUNCTIONS, ret);
-		goto done;
-	}
-	msleep(200);
-
-	/* Enable AICL */
-	ret = smb349_i2c_write(priv->i2c_client,
-			SMB349_FUNCTIONS, aicl_enable_val);
-	if (ret) {
-		dev_err(priv->dev,
-				"%s: Unable to write to reg %02x: %d\n",
-				__func__, SMB349_FUNCTIONS, ret);
-		goto done;
-	}
-
-	ret = 0;
-
-done:
-	if (smb349_config(priv, 0)) {
-		dev_err(priv->dev,
-			"%s: Unable to enable writes to CONFIG regs\n",
-			__func__);
-		ret = -1;
-	}
-
-	return ret;
-}
-
-void smb349_charge_control_worker(struct work_struct *work)
-{
-	struct smb349_priv *priv = container_of(work,
-				struct smb349_priv, charge_work.work);
-
-	int32_t volts = 0;
-	int32_t temp = 0;
-
-	if (!charging_started)
-		return;
-
-	temp = get_battery_parameters(GET_BAT_TEMPERATURE);
-
-	if ((temp >= 0) && (temp < 150)) {
-		volts = get_battery_parameters(GET_BAT_VOLTAGE);
-
-		if ((volts > 2999000) && (volts < 4100000)) {
-			if (charge_mode == DEFAULT_CHARGE_MODE) {
-				dev_err(priv->dev,
-					"Set charging current to 900mA and FV to 4.1V\n");
-				smb349_set_current_limit(priv, 2);
-				smb349_set_float_voltage(priv, 459);
-				charge_mode = CHARGE_900MA_410V;
-			}
-		} else if ((volts > 4099999) && (volts < 4350000)) {
-				if (charge_mode != CHARGE_500MA_435V) {
-					dev_err(priv->dev,
-						"Set charging current to 500mA and FV to 4.35V\n");
-					smb349_set_current_limit(priv, 0);
-					smb349_set_float_voltage(priv, 459);
-					charge_mode = CHARGE_500MA_435V;
-				}
-			}
-	} else {
-		if (charge_mode != DEFAULT_CHARGE_MODE) {
-			smb349_set_current_limit(priv, 10);
-			charge_mode = DEFAULT_CHARGE_MODE;
-			}
-	}
-	schedule_delayed_work(&priv->charge_work,
-		msecs_to_jiffies(CHR_CHK_INTERVAL));
-
-}
-#endif
-
-/* Worker thread to reload registers */
-static void smb349_fixup_worker(struct work_struct *work)
-{
-	struct smb349_priv *priv = container_of(work,
-				struct smb349_priv, fixup_work);
-
-	smb349_config_fixup(priv);
 }
 
 static void smb349_handle_charger_error(struct smb349_priv *priv, int error_id)
@@ -868,6 +850,145 @@ static void smb349_handle_charger_error(struct smb349_priv *priv, int error_id)
 #endif
 }
 
+#define SOFT_COLD_LIMIT                 15
+#define HOT_HARD_LIMIT                  60
+#define LOW_TEMP_CHARGE_WORK_INTERVAL   60000
+#define HIGH_TEMP_CHARGE_WORK_INTERVAL  300000
+
+static void smb349_check_temp(struct smb349_priv *priv)
+{
+	union power_supply_propval ret = {0,};
+	int battery_temp;
+	int charge_mode = CHARGE_MODE_NORMAL;
+	int voltage;
+	int idx;
+
+	cancel_delayed_work(&priv->charge_work);
+
+	/* Check battery temp */
+	priv->bq27x41->get_property(priv->bq27x41,
+				POWER_SUPPLY_PROP_TEMP, &ret);
+	battery_temp = ret.intval / 10; /* round down */
+
+	dev_dbg(priv->dev, "%s: begin temp=%d\n", __func__, battery_temp);
+
+	/* Manually check the Hot limit to avoid spurious interrupts */
+	if (battery_temp >= HOT_HARD_LIMIT) {
+		smb349_handle_charger_error(priv,
+				POWER_SUPPLY_HEALTH_OVERHEAT);
+	}
+
+	/* Do nothing if DCP is not connected */
+	if (!atomic_read(&priv->ac_online))
+		return;
+
+	/* Check to see if the device is 0-15C and the current limit is high */
+	if ((battery_temp <= SOFT_COLD_LIMIT)) {
+
+		/* Check battery level */
+		priv->bq27x41->get_property(priv->bq27x41,
+					POWER_SUPPLY_PROP_VOLTAGE_NOW, &ret);
+		voltage = ret.intval;
+
+		dev_dbg(priv->dev, "Device cold, voltage=%d\n", voltage);
+
+		if (voltage >= FLOAT_VOLTAGE_NORMAL) {
+			charge_mode = CHARGE_MODE_NORMAL;
+		} else if (voltage >= FLOAT_VOLTAGE_COLD) {
+			charge_mode = CHARGE_MODE_500MA_435V;
+		} else if (voltage >= FLOAT_VOLTAGE_MIN) {
+			charge_mode = CHARGE_MODE_900MA_435V;
+		} else {
+			charge_mode = CHARGE_MODE_NORMAL;
+		}
+
+		schedule_delayed_work(&priv->charge_work,
+				msecs_to_jiffies(LOW_TEMP_CHARGE_WORK_INTERVAL));
+
+		/* Battery voltage will droop when switching to the lower
+		   current, make sure that we do not get into a loop.  Once
+		   the device has entered the lowest current state, do not leave
+		   until the device warms up or the charger is unplugged */
+		if (priv->charge_mode == CHARGE_MODE_500MA_435V) {
+			dev_dbg(priv->dev,
+				"Voltage droop, do not increase current\n");
+			return;
+		}
+
+	} else {
+		/* Schedule a lower polling interval at high temp since we
+		   do not always get soft cold IRQs from smb349 */
+		schedule_delayed_work(&priv->charge_work,
+			      msecs_to_jiffies(HIGH_TEMP_CHARGE_WORK_INTERVAL));
+	}
+
+	if (priv->charge_mode != charge_mode) {
+		dev_dbg(priv->dev, "charge mode changed: %d -> %d\n",
+			priv->charge_mode, charge_mode);
+
+		switch (charge_mode) {
+		case CHARGE_MODE_900MA_435V:
+			dev_info(priv->dev,
+				"Device cold, current limit=900mA\n");
+
+			/* In cold we need to limit charge to .9A */
+			smb349_change_current_limit(priv, 1);
+			break;
+		case CHARGE_MODE_500MA_435V:
+			dev_info(priv->dev,
+				"Device cold, current limit=500mA\n");
+
+			/* After 4.1V we need to limit charge to .5A */
+			smb349_change_current_limit(priv, 0);
+			break;
+		default:
+			/* reset current limit */
+			idx = smb349_get_current_limit_index(priv->current_limit);
+			if (idx >= 0) {
+				dev_info(priv->dev,
+					"Change current_limit to [%d]\n",
+					priv->current_limit);
+				if (smb349_change_current_limit(priv, idx)) {
+					dev_err(priv->dev,
+						"Unable to change current limit\n");
+				}
+			}
+			break;
+		}
+		priv->charge_mode = charge_mode;
+		dev_dbg(priv->dev, "charge mode set: %d\n", priv->charge_mode);
+	}
+
+}
+
+static void smb349_charge_worker(struct work_struct *work)
+{
+
+	struct smb349_priv *priv = container_of(work,
+				struct smb349_priv, charge_work.work);
+#ifdef SMB349_DEBUG
+	int error;
+	u8 status_a = 0xFF, status_e = 0xFF;
+
+	if ((error = smb349_i2c_read(priv->i2c_client,
+						SMB349_STATUS_REG_A,
+						&status_a))) {
+		printk(KERN_ERR "couldn't read status_a\n");
+	}
+
+	if ((error = smb349_i2c_read(priv->i2c_client,
+						SMB349_STATUS_REG_E,
+						&status_e))) {
+		printk(KERN_ERR "couldn't read status_e\n");
+	}
+
+	dev_err(priv->dev, "charge: mode=%d status_a=0x%02x status_e=0x%02x\n",
+		priv->charge_mode, status_a, status_e);
+#endif
+
+	smb349_check_temp(priv);
+}
+
 /* IRQ worker */
 static void smb349_irq_worker(struct work_struct *work)
 {
@@ -875,13 +996,12 @@ static void smb349_irq_worker(struct work_struct *work)
 	int ret = -1;
 	int idx = 0;
 	int disconnected = 0;
-#ifdef CONFIG_AMAZON_METRICS_LOG
-	char buf[METRICS_STR_LEN];
-#endif
+
 	struct smb349_priv *priv = container_of(work,
 				struct smb349_priv, irq_work.work);
 	BUG_ON(!priv);
-	printk("Entering %s\n",__func__);
+
+	dev_dbg(priv->dev, "%s: begin\n", __func__);
 
 	/* Check interrupt status E (disconnect) register first */
 	ret = smb349_i2c_read(priv->i2c_client, SMB349_INTSTAT_REG_E, &value);
@@ -894,8 +1014,6 @@ static void smb349_irq_worker(struct work_struct *work)
 			"INTSTAT_REG_E is %02x\n", value);
 
 		disconnected = (value & SMB349_INTSTAT_E_UV_STATUS);
-		if (disconnected)
-			printk("disconnected\n");
 
 		/* If the cable is not present, run disconnect routine
 		   if the irq is still enabled or if we have not already
@@ -906,35 +1024,27 @@ static void smb349_irq_worker(struct work_struct *work)
 			disconnected) {
 			dev_info(priv->dev,
 				"USB disconnected\n");
-#ifdef CONFIG_AMAZON_METRICS_LOG
-			if (atomic_read(&priv->usb_online)) {
-				snprintf(buf, sizeof(buf),
-				"smb349:def:usb_disconnected=1;CT;1:NR");
-			log_to_metrics(ANDROID_LOG_INFO, "charger", buf);
-			}
-#endif
+			apsd_triggered = 0;
 
 			atomic_set(&priv->ac_online, 0);
 			atomic_set(&priv->usb_online, 0);
 			power_supply_changed(&priv->usb);
 			power_supply_changed(&priv->ac);
-			power_supply_set_present(priv->dwc3_usb, 0);
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-			charging_started = 0;
-#endif
+
+			if (!priv->apsd_disabled)
+				power_supply_set_present(priv->dwc3_usb, 0);
+
 			/* newer parts go back to defaults after unplug */
 			smb349_config_fixup(priv);
 
-			/* Locate the first smaller input current limit*/
-			for (idx = ARRAY_SIZE(smb349_input_current_limits) - 1; idx >= 0; idx--)
-				if (smb349_input_current_limits[idx] <= priv->current_limit)
-					break;
-			dev_info(priv->dev, "Change current_limt to [%d]\n", priv->current_limit);
-			if (idx < 0) {
-				dev_err(priv->dev, "Invalid current limit value\n");
-			} else {
+			/* reset current limit */
+			idx = smb349_get_current_limit_index(priv->current_limit);
+			if (idx >= 0) {
+				dev_info(priv->dev, "Change current_limit to [%d]\n",
+					priv->current_limit);
 				if (smb349_change_current_limit(priv, idx)) {
-					dev_err(priv->dev, "Unable to change input current limit\n");
+					dev_err(priv->dev,
+						"Unable to change input current limit\n");
 				}
 			}
 
@@ -957,20 +1067,12 @@ static void smb349_irq_worker(struct work_struct *work)
 		dev_dbg(priv->dev,
 			"INTSTAT_REG_A is %02x\n", value);
 
-		if (value & SMB349_INTSTAT_A_HOT_HARD) {
-			dev_warn(priv->dev,
-					"Charger Overheat is detected, this might be a false alarm, check the status register A == %d\n", value);
-#if 0
-			smb349_handle_charger_error(priv,
-						POWER_SUPPLY_HEALTH_OVERHEAT);
-#endif
-		}
-
 		if (value & SMB349_INTSTAT_A_COLD_HARD) {
 			smb349_handle_charger_error(priv,
 						POWER_SUPPLY_HEALTH_COLD);
 		}
 
+		smb349_check_temp(priv);
 	}
 
 	/* Check interrupt status B register */
@@ -1040,21 +1142,16 @@ static void smb349_irq_worker(struct work_struct *work)
 		/* Don't handle charger detect IRQs if cable has already been
 		   unplugged */
 		if (!disconnected) {
-			/* Check for APSD status */
-			if (value & SMB349_INTSTAT_D_APSD_CMPL) {
-				if (!SMB349_IS_APSD_DONE(value)) {
-					dev_warn(priv->dev,
-						"Spurious APSD IRQ!\n");
-				} else {
-					smb349_apsd_complete(priv);
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-					/* set charging flag and start
-					 * charging control in 1 second */
-					charging_started = 1;
-					schedule_delayed_work(
-							&priv->charge_work,
-							msecs_to_jiffies(1000));
-#endif
+
+			if (!priv->apsd_disabled) {
+				/* Check for APSD status */
+				if (value & SMB349_INTSTAT_D_APSD_CMPL) {
+					if (!SMB349_IS_APSD_DONE(value)) {
+						dev_warn(priv->dev,
+							"Spurious APSD IRQ!\n");
+					} else {
+						smb349_apsd_complete(priv);
+					}
 				}
 			}
 
@@ -1073,16 +1170,27 @@ static void smb349_irq_worker(struct work_struct *work)
 		dev_warn(priv->dev,
 			"Failed to read SMB349_INTSTAT_REG_F: %d\n", ret);
 	} else {
+		char *envp[2] = {"OTG_OVERCURRENT_IRQ=0", NULL};
+
 #ifdef SMB349_DEBUG
 		dev_info(priv->dev,
 			"INTSTAT_REG_F is %02x\n", value);
 #endif
+		/* check bit 7 of INTSTAT_REG_F, for the OTG over-current limit IRQ */
+		if (value & SMB349_OVERCURRENT_IRQ) {
+			sprintf(envp[0], "OTG_OVERCURRENT_IRQ=%d",
+				(value & SMB349_OVERCURRENT_IRQ) !=0);
+			kobject_uevent_env(&priv->dev->kobj, KOBJ_CHANGE, envp);
+			dev_info(priv->dev, "%s: Send uevent %s", __func__, envp[0]);
+		}
 	}
 
-	if (priv->polling_mode)
+	if (priv->polling_mode) {
 		schedule_delayed_work(&priv->irq_work, msecs_to_jiffies(1000));
-	else
+	} else if (priv->handle_irq) {
+		priv->handle_irq = 0;
 		enable_irq(priv->irq);
+	}
 
 	ret = smb349_i2c_read(priv->i2c_client, SMB349_INTSTAT_REG_F, &value);
 
@@ -1098,27 +1206,41 @@ static void smb349_irq_worker(struct work_struct *work)
 				atomic_set(&priv->usb_online, 0);
 				power_supply_changed(&priv->usb);
 				power_supply_changed(&priv->ac);
-				power_supply_set_present(priv->dwc3_usb, 0);
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-				charging_started = 0;
-#endif
+
+				if (!priv->apsd_disabled)
+					power_supply_set_present(priv->dwc3_usb, 0);
+
 				/* newer parts go back to defaults after unplug */
 				smb349_config_fixup(priv);
-				/* Locate the first smaller input current limit*/
-				for (idx = ARRAY_SIZE(smb349_input_current_limits) - 1; idx >= 0; idx--)
-					if (smb349_input_current_limits[idx] <= priv->current_limit)
-						break;
-				dev_info(priv->dev, "Change current_limt to [%d]\n", priv->current_limit);
-				if (idx < 0) {
-					dev_err(priv->dev, "Invalid current limit value\n");
-				} else {
+
+				/* reset current limit */
+				idx = smb349_get_current_limit_index(priv->current_limit);
+				if (idx >= 0) {
+					dev_info(priv->dev, "Change current_limt to [%d]\n",
+						priv->current_limit);
 					if (smb349_change_current_limit(priv, idx)) {
-						dev_err(priv->dev, "Unable to change input current limit\n");
+						dev_err(priv->dev,
+							"Unable to change input current limit\n");
 					}
 				}
+
+#if defined(CONFIG_PM_WAKELOCKS)
+				pm_wake_unlock("smb349");
+#endif
 #ifdef CONFIG_AMAZON_METRICS_LOG
 				schedule_work(&priv->disconnect_log_work);
 #endif
+
+			} else if (priv->apsd_disabled) {
+				if (!atomic_read(&priv->ac_online)) {
+
+					dev_info(priv->dev, "Detected charger present\n");
+
+					atomic_set(&priv->ac_online, 1);
+					atomic_set(&priv->usb_online, 0);
+					power_supply_changed(&priv->usb);
+					power_supply_changed(&priv->ac);
+				}
 			}
 		} else {
 			if (SMB349_IS_POWER_OK(value)) {
@@ -1126,21 +1248,26 @@ static void smb349_irq_worker(struct work_struct *work)
 			}
 		}
 	}
-	priv->handle_irq = 0;
+
+	if (wake_lock_active(&priv->irq_wake_lock))
+		wake_unlock(&priv->irq_wake_lock);
 }
 
 static irqreturn_t smb349_irq(int irq, void *data)
 {
-	struct smb349_priv *priv =
-			(struct smb349_priv *)data;
+	struct smb349_priv *priv = (struct smb349_priv *)data;
 
 	disable_irq_nosync(priv->irq);
 
 	priv->handle_irq = 1;
+
 	/* Need to wait until i2c susbsytem is resumed */
 	if (!atomic_read(&priv->suspended)) {
 		/* Scrub through the registers to ack any interrupts */
 		schedule_delayed_work(&priv->irq_work, 0);
+	} else {
+		/* Make sure we stay awake until the irq has been handled */
+		wake_lock(&priv->irq_wake_lock);
 	}
 
 	return IRQ_HANDLED;
@@ -1199,24 +1326,74 @@ static int smb349_read_id(struct smb349_priv *priv, int *id)
 static int smb349_enable_charging(struct smb349_priv *priv, int enable)
 {
 	int ret = -1;
+	unsigned char value;
+
 	if (priv->chrg_en != -1) {
+		/* Use EN pin to control charging */
 		if (enable) {
 			gpio_set_value(priv->chrg_en, 0);
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-			charging_started = 1;
-			/* set charging flag and start
-			 * charging control in 1 second */
-			schedule_delayed_work(&priv->charge_work,
-					msecs_to_jiffies(1000));
-#endif
 		} else {
 			gpio_set_value(priv->chrg_en, 1);
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-			charging_started = 0;
-#endif
 		}
 
 		ret = 0;
+	} else {
+		/* Control charging in sw */
+		if (smb349_config(priv, 1)) {
+			dev_err(priv->dev,
+				"Unable to enable writes to CONFIG regs\n");
+			return ret;
+		}
+
+		ret = smb349_i2c_read(priv->i2c_client,
+				SMB349_ENABLE_CONTROL, &value);
+		if (ret) {
+			dev_err(priv->dev,
+				"%s: Unable to read ENABLE_CONTROL: %d\n",
+				__func__, ret);
+			goto done;
+		}
+
+		if (enable) {
+			/* Switch to pin control (pull down) */
+			value |= SMB349_EN_CTRL_MASK;
+		} else {
+			/* Switch to i2c control (0 disables chrg) */
+			value &= ~SMB349_EN_CTRL_MASK;
+		}
+
+		ret = smb349_i2c_write(priv->i2c_client,
+				SMB349_ENABLE_CONTROL, value);
+		if (ret) {
+			dev_err(priv->dev,
+				"%s: Unable to write ENABLE_CONTROL: %d\n",
+				__func__, ret);
+			goto done;
+		}
+
+		if (!enable) {
+			ret = smb349_i2c_read(priv->i2c_client,
+					SMB349_COMMAND_REG_A, &value);
+			if (ret) {
+				dev_err(priv->dev,
+					"Couldn't read CMD reg A ret=%d\n", ret);
+				goto done;
+			}
+			value &= ~SMB349_COMMAND_A_CHRG_EN;
+
+			ret = smb349_i2c_write(priv->i2c_client,
+					SMB349_COMMAND_REG_A, value);
+			if (ret) {
+				dev_err(priv->dev,
+					"Couldn't disable charging ret=%d\n",
+					ret);
+			}
+		}
+	done:
+		if (smb349_config(priv, 0)) {
+			dev_err(priv->dev,
+				"Unable to disable writes to CONFIG regs\n");
+		}
 	}
 
 	return ret;
@@ -1232,6 +1409,351 @@ static enum power_supply_property smb349_usb_props[] = {
 	POWER_SUPPLY_PROP_HEALTH,
 };
 
+static int smb349_enable_otg(struct smb349_priv *chip, int enable)
+{
+	int rc = 0;
+	u8 value = 0;
+
+	rc = smb349_i2c_read(chip->i2c_client, SMB349_COMMAND_REG_A, &value);
+	if (rc) {
+		dev_err(chip->dev, "Couldn't read OTG mode rc=%d\n", rc);
+		return rc;
+	}
+
+	if (enable)
+		value |= SMB349_COMMAND_A_OTG_EN;
+	else
+		value &= ~SMB349_COMMAND_A_OTG_EN;
+
+	rc = smb349_i2c_write(chip->i2c_client, SMB349_COMMAND_REG_A, value);
+	if (rc) {
+		dev_err(chip->dev, "Couldn't set OTG mode rc=%d\n", rc);
+		return rc;
+	}
+
+	if (enable) {
+		/* Set OTG current limit */
+		rc = smb349_otg_current_limit(chip, chip->otg_current_limit);
+	}
+
+	return rc;
+}
+
+#define OTG_WORK_INTERVAL   500
+
+static void smb349_otg_worker(struct work_struct *work)
+{
+	int rc = 0;
+	u8 value = 0;
+	struct smb349_priv *chip = container_of(work,
+				struct smb349_priv, otg_work.work);
+
+	/* Check to see if smb349 has reset */
+	if (chip->otg_enabled) {
+		rc = smb349_i2c_read(chip->i2c_client,
+				SMB349_COMMAND_REG_A, &value);
+		if (rc) {
+			dev_err(chip->dev,
+				"Couldn't read OTG mode rc=%d\n", rc);
+			return;
+		}
+
+		dev_dbg(chip->dev, "%s: value=0x%x\n", __func__, value);
+
+		/* Fix up smb349 registers if mismatch detected */
+		if (!(value & SMB349_COMMAND_A_OTG_EN)) {
+			dev_info(chip->dev, "USB OTG inrush reset!\n");
+
+			smb349_config_fixup(chip);
+			smb349_enable_otg(chip, 1);
+		}
+
+		schedule_delayed_work(&chip->otg_work,
+				msecs_to_jiffies(OTG_WORK_INTERVAL));
+	}
+}
+
+static int smb349_chg_otg_host_regulator_enable(struct regulator_dev *rdev)
+{
+	int rc = 0;
+	struct smb349_priv *chip = rdev_get_drvdata(rdev);
+
+	rc = smb349_enable_otg(chip, 1);
+	if (!rc) {
+		chip->otg_enabled = true;
+
+		/* HACK - workaround Saturn USB OTG inrush current bug */
+		schedule_delayed_work(&chip->otg_work,
+				msecs_to_jiffies(OTG_WORK_INTERVAL));
+	}
+
+	return rc;
+}
+
+static int smb349_chg_otg_host_regulator_disable(struct regulator_dev *rdev)
+{
+	struct smb349_priv *chip = rdev_get_drvdata(rdev);
+
+	chip->otg_enabled = false;
+	cancel_delayed_work_sync(&chip->otg_work);
+
+	return smb349_enable_otg(chip, 0);
+}
+
+static int smb349_chg_otg_host_regulator_is_enable(struct regulator_dev *rdev)
+{
+	struct smb349_priv *chip = rdev_get_drvdata(rdev);
+
+	return chip->otg_enabled;
+}
+
+
+struct regulator_ops smb349_chg_otg_host_reg_ops = {
+	.enable		= smb349_chg_otg_host_regulator_enable,
+	.disable	= smb349_chg_otg_host_regulator_disable,
+	.is_enabled	= smb349_chg_otg_host_regulator_is_enable,
+};
+
+
+static int smb349_regulator_otg_host_init(struct smb349_priv *chip)
+{
+	int rc = 0;
+	struct regulator_init_data *init_data;
+	struct regulator_config cfg = {};
+	struct device_node *of_node;
+
+	of_node = of_get_child_by_name(chip->dev->of_node, "smb349_otg_supply");
+	init_data = of_get_regulator_init_data(chip->dev, of_node);
+	if (!init_data) {
+		dev_err(chip->dev, "Unable to allocate memory\n");
+		return -ENOMEM;
+	}
+
+	if (init_data->constraints.name) {
+		chip->otg_vreg.rdesc.owner = THIS_MODULE;
+		chip->otg_vreg.rdesc.type = REGULATOR_VOLTAGE;
+		chip->otg_vreg.rdesc.ops = &smb349_chg_otg_host_reg_ops;
+		chip->otg_vreg.rdesc.name = init_data->constraints.name;
+
+		cfg.dev = chip->dev;
+		cfg.init_data = init_data;
+		cfg.driver_data = chip;
+		cfg.of_node = of_node;
+
+		init_data->constraints.valid_ops_mask
+			|= REGULATOR_CHANGE_STATUS;
+
+		chip->otg_vreg.rdev = regulator_register(
+						&chip->otg_vreg.rdesc, &cfg);
+		if (IS_ERR(chip->otg_vreg.rdev)) {
+			rc = PTR_ERR(chip->otg_vreg.rdev);
+			chip->otg_vreg.rdev = NULL;
+			if (rc != -EPROBE_DEFER)
+				dev_err(chip->dev,
+					"OTG reg failed, rc=%d\n", rc);
+		}
+	}
+
+	return rc;
+}
+
+static int smb349_APSD_enable(struct smb349_priv *chip, int enable)
+{
+	int ret = -1;
+        u8 value = 0;
+
+	mutex_lock(&chip->lock);
+
+	dev_dbg(chip->dev, "%s: begin en=%d\n", __func__, enable);
+
+	chip->apsd_disabled = !enable;
+
+	/* We will modify config after i2c is up */
+	if (atomic_read(&chip->suspended)) {
+		ret = 0;
+		goto err1;
+	}
+
+        if (smb349_config(chip, 1)) {
+                dev_err(chip->dev, "Unable to enable writes to CONFIG regs\n");
+                goto err1;
+        }
+
+        if ((ret = smb349_i2c_read(chip->i2c_client,SMB349_FUNCTIONS, &value))) {
+                dev_err(chip->dev, "%s: Unable to read SMB349_FUNCTIONS: %d\n",__FUNCTION__, ret);
+                goto err0;
+        }
+
+	if (enable)
+		value |= (SMB349_FUNCTIONS_APSD_EN_MASK | SMB349_FUNCTIONS_AICL_EN_MASK);
+	else
+		value &= ~(SMB349_FUNCTIONS_APSD_EN_MASK | SMB349_FUNCTIONS_AICL_EN_MASK);
+
+        if ((ret = smb349_i2c_write(chip->i2c_client, SMB349_FUNCTIONS, value))) {
+                dev_err(chip->dev, "%s: Unable to write SMB349_FUNCTIONS: %d\n", __FUNCTION__, ret);
+                goto err0;
+        }
+
+        ret = 0;
+
+err0:
+        if (smb349_config(chip, 1))
+                dev_err(chip->dev, "Unable to enable writes to CONFIG regs\n");
+err1:
+        mutex_unlock(&chip->lock);
+        return ret;
+}
+
+static int smb349_chg_apsd_host_regulator_enable(struct regulator_dev *rdev)
+{
+	int ret = 0;
+	struct smb349_priv *chip = rdev_get_drvdata(rdev);
+
+	ret = smb349_APSD_enable(chip, 1);
+
+        return ret;
+}
+
+static int smb349_chg_apsd_host_regulator_disable(struct regulator_dev *rdev)
+{
+	int ret = 0;
+	struct smb349_priv *chip = rdev_get_drvdata(rdev);
+
+	ret = smb349_APSD_enable(chip, 0);
+
+	return ret;
+}
+
+static int smb349_chg_apsd_host_regulator_is_enable(struct regulator_dev *rdev)
+{
+	int ret = 0;
+	struct smb349_priv *chip = rdev_get_drvdata(rdev);
+
+	mutex_lock(&chip->lock);
+	ret = !chip->apsd_disabled;
+	mutex_unlock(&chip->lock);
+
+	return ret;
+}
+
+static int smb349_chg_apsd_set_current_limit(struct regulator_dev *rdev,
+					int min_uA, int max_uA)
+{
+	int ret = -1;
+	u8 value = 0;
+	struct smb349_priv *chip = rdev_get_drvdata(rdev);
+
+	mutex_lock(&chip->lock);
+
+	if (smb349_config(chip, 1)) {
+		dev_err(chip->dev,
+			"Unable to enable writes to CONFIG regs\n");
+		goto done;
+	}
+
+	/* Re-enable AICL */
+	if ((ret = smb349_i2c_read(chip->i2c_client,SMB349_FUNCTIONS, &value))) {
+                dev_err(chip->dev, "%s: Unable to read SMB349_FUNCTIONS: %d\n",__FUNCTION__, ret);
+                goto done;
+        }
+
+	value |= SMB349_FUNCTIONS_AICL_EN_MASK;
+
+        if ((ret = smb349_i2c_write(chip->i2c_client, SMB349_FUNCTIONS, value))) {
+                dev_err(chip->dev, "%s: Unable to write SMB349_FUNCTIONS: %d\n", __FUNCTION__, ret);
+                goto done;
+        }
+
+	/* Switch to charging i2c control */
+	ret = smb349_i2c_read(chip->i2c_client,
+			SMB349_ENABLE_CONTROL, &value);
+	if (ret) {
+		dev_err(chip->dev,
+			"%s: Unable to read ENABLE_CONTROL: %d\n",
+			__func__, ret);
+		goto done;
+	}
+
+	value &= ~SMB349_USBCS_EN_CTRL_MASK;
+
+	ret = smb349_i2c_write(chip->i2c_client,
+			SMB349_ENABLE_CONTROL, value);
+	if (ret) {
+		dev_err(chip->dev,
+			"%s: Unable to write ENABLE_CONTROL: %d\n",
+			__func__, ret);
+		goto done;
+	}
+
+	/* Switch to High Current mode, this will retrigger AICL */
+	ret = smb349_switch_mode(chip, SMB349_USB_MODE_HC);
+	if (ret) {
+		dev_warn(chip->dev,
+			"Unable to modify charge current mode\n");
+	}
+
+	if (smb349_config(chip, 0)) {
+		dev_err(chip->dev,
+			"Unable to disable writes to CONFIG regs\n");
+		goto done;
+	}
+
+done:
+	mutex_unlock(&chip->lock);
+
+	return ret;
+}
+
+struct regulator_ops smb349_chg_apsd_host_reg_ops = {
+	.enable		= smb349_chg_apsd_host_regulator_enable,
+	.disable	= smb349_chg_apsd_host_regulator_disable,
+	.set_current_limit = smb349_chg_apsd_set_current_limit,
+	.is_enabled	= smb349_chg_apsd_host_regulator_is_enable,
+};
+
+static int smb349_regulator_apsd_host_init(struct smb349_priv *chip)
+{
+	int rc = 0;
+	struct regulator_init_data *init_data;
+	struct regulator_config cfg = {};
+	struct device_node *of_node;
+
+	of_node = of_get_child_by_name(chip->dev->of_node, "smb349_apsd_supply");
+	init_data = of_get_regulator_init_data(chip->dev, of_node);
+	if (!init_data) {
+		dev_err(chip->dev, "Unable to allocate memory\n");
+		return -ENOMEM;
+	}
+
+	if (init_data->constraints.name) {
+		chip->apsd_ctrl.rdesc.owner = THIS_MODULE;
+		chip->apsd_ctrl.rdesc.type = REGULATOR_VOLTAGE;
+		chip->apsd_ctrl.rdesc.ops = &smb349_chg_apsd_host_reg_ops;
+		chip->apsd_ctrl.rdesc.name = init_data->constraints.name;
+
+		cfg.dev = chip->dev;
+		cfg.init_data = init_data;
+		cfg.driver_data = chip;
+		cfg.of_node = of_node;
+
+		init_data->constraints.valid_ops_mask
+			|= (REGULATOR_CHANGE_STATUS | REGULATOR_CHANGE_CURRENT);
+		init_data->constraints.min_uA = 0;
+		init_data->constraints.max_uA = 2400000;
+
+		chip->apsd_ctrl.rdev = regulator_register(
+						&chip->apsd_ctrl.rdesc, &cfg);
+		if (IS_ERR(chip->apsd_ctrl.rdev)) {
+			rc = PTR_ERR(chip->apsd_ctrl.rdev);
+			chip->apsd_ctrl.rdev = NULL;
+			if (rc != -EPROBE_DEFER)
+				dev_err(chip->dev,
+					"OTG reg failed, rc=%d\n", rc);
+		}
+	}
+
+	return rc;
+}
 
 #ifdef CONFIG_AMAZON_METRICS_LOG
 static void smb349_disconnect_log_worker(struct work_struct *work)
@@ -1539,7 +2061,6 @@ done:
 	mutex_unlock(&priv->lock);
 	return len;
 }
-
 static DEVICE_ATTR(status_e, S_IRUGO, smb349_status_e_show, NULL);
 
 static ssize_t smb349_charge_current_show(struct device *dev,
@@ -1636,13 +2157,14 @@ static int smb349_modify_charge_current(struct smb349_priv *priv,
 			char buf[METRICS_STR_LEN];
 
 			snprintf(buf, sizeof(buf),
-		"smb349:def:chgevent=1;CT;1,current_limit=%d;CT;1:NR",
+			  "smb349:def:chgevent=1;CT;1,charge_current=%d;CT;1:NR",
 			smb349_fast_charge_currents[value >> 4]);
 
 			log_to_metrics(ANDROID_LOG_INFO, "charger", buf);
 		}
 #endif
 		ret = 0;
+
 	} else if (precharge_current != -1) {
 		/* Adjust pre-charge current */
 		if ((ret = smb349_i2c_read(priv->i2c_client,
@@ -1792,19 +2314,29 @@ done:
 	return len;
 }
 
+static int smb349_get_current_limit_index(int limit)
+{
+	int idx;
+
+	/* Locate the first smaller input current limit*/
+	for (idx = ARRAY_SIZE(smb349_input_current_limits) - 1; idx >= 0; idx--)
+		if (smb349_input_current_limits[idx] <= limit)
+			break;
+
+	return idx;
+}
+
 static int smb349_change_current_limit(struct smb349_priv *priv, int idx)
 {
 	int ret = -1;
-	const int aicl_disable_val = 0xa7;
-	const int aicl_enable_val = 0xb7;
 	unsigned char value = 0xff;
+	unsigned char oldvalue;
 
 	if (smb349_config(priv, 1)) {
 		dev_err(priv->dev, "Unable to enable writes to CONFIG regs\n");
 		goto done;
 	}
 
-	/* Adjust input current limit */
 	if ((ret = smb349_i2c_read(priv->i2c_client, SMB349_CURRENT_LIMIT, &value))) {
 		dev_err(priv->dev,
 				"%s: Unable to read SMB349_CURRENT_LIMIT: %d\n",
@@ -1812,34 +2344,52 @@ static int smb349_change_current_limit(struct smb349_priv *priv, int idx)
 		goto done;
 	}
 
-	priv->current_limit = smb349_input_current_limits[idx];
+	oldvalue = value & 0xf;
+
+	/* Need to disable AICL to increase the input current */
+	if (idx > oldvalue) {
+		unsigned char func_value;
+
+		/* Disable AICL */
+		if ((ret = smb349_i2c_read(priv->i2c_client,SMB349_FUNCTIONS, &func_value))) {
+			dev_err(priv->dev, "%s: Unable to read SMB349_FUNCTIONS: %d\n",
+				__func__, ret);
+			goto done;
+		}
+
+		func_value &= ~SMB349_FUNCTIONS_AICL_EN_MASK;
+
+		if ((ret = smb349_i2c_write(priv->i2c_client, SMB349_FUNCTIONS, func_value))) {
+			dev_err(priv->dev, "%s: Unable to write SMB349_FUNCTIONS: %d\n",
+				__func__, ret);
+			goto done;
+		}
+	}
+
 	value &= ~0x0f;
 	value |= idx;
 
+	/* Adjust input current limit */
 	if ((ret = smb349_i2c_write(priv->i2c_client, SMB349_CURRENT_LIMIT, value))) {
 		dev_err(priv->dev,
 				"%s: Unable to write SMB349_CURRENT_LIMIT: %d\n",
 				__FUNCTION__, ret);
 		goto done;
 	}
-	msleep(200);
 
-	/* Disable AICL */
-	if ((ret = smb349_i2c_write(priv->i2c_client, SMB349_FUNCTIONS, aicl_disable_val))) {
-		dev_err(priv->dev,
-				"%s: Unable to write to reg %02x: %d\n",
-				__FUNCTION__, SMB349_FUNCTIONS, ret);
-		goto done;
-	}
-	msleep(200);
+	mdelay(200);
 
-	/* Enable AICL */
-	if ((ret = smb349_i2c_write(priv->i2c_client, SMB349_FUNCTIONS, aicl_enable_val))) {
-		dev_err(priv->dev,
-				"%s: Unable to write to reg %02x: %d\n",
-				__FUNCTION__, SMB349_FUNCTIONS, ret);
-		goto done;
+#ifdef CONFIG_AMAZON_METRICS_LOG
+	if (oldvalue != idx) {
+		char buf[METRICS_STR_LEN];
+
+		snprintf(buf, sizeof(buf),
+			"smb349:def:chgevent=1;CT;1,current_limit=%d;CT;1:NR",
+			smb349_input_current_limits[value >> 4]);
+
+		log_to_metrics(ANDROID_LOG_INFO, "charger", buf);
 	}
+#endif
 
 	ret = 0;
 
@@ -1861,11 +2411,7 @@ static ssize_t smb349_current_limit_store(struct device *dev,
 
 	mutex_lock(&priv->lock);
 
-	/* Locate the first smaller input current limit*/
-	for (idx = ARRAY_SIZE(smb349_input_current_limits) - 1; idx >= 0; idx--)
-		if (smb349_input_current_limits[idx] <= value)
-			break;
-
+	idx = smb349_get_current_limit_index(value);
 	if (idx < 0) {
 		dev_err(priv->dev, "Invalid current limit value\n");
 		goto done;
@@ -1875,6 +2421,8 @@ static ssize_t smb349_current_limit_store(struct device *dev,
 		dev_err(priv->dev, "Unable to change input current limit\n");
 		goto done;
 	}
+
+	priv->current_limit = smb349_input_current_limits[idx];
 done:
 
 	mutex_unlock(&priv->lock);
@@ -1885,6 +2433,93 @@ done:
 static DEVICE_ATTR(current_limit, S_IRUGO | S_IWUSR | S_IWGRP,
 			smb349_current_limit_show,
 			smb349_current_limit_store);
+
+
+
+static ssize_t smb349_float_voltage_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
+	int error = 0;
+	ssize_t len = 0;
+	u8 value = 0xff;
+	int float_voltage = 0;
+
+	mutex_lock(&priv->lock);
+
+	if ((error = smb349_i2c_read(priv->i2c_client,
+				SMB349_FLOAT_VOLTAGE, &value))) {
+		dev_err(priv->dev,
+			"Error reading SMB349_FLOAT_VOLTAGE: %d\n", error);
+
+		goto done;
+	}
+
+	value &= SMB349_FLOAT_VOLTAGE_MASK;
+	float_voltage = (SMB349_FLOAT_VOLTAGE_MIN + (2 * value)) * 10000;
+
+	len += sprintf(buf, "%d\n", float_voltage);
+
+done:
+	mutex_unlock(&priv->lock);
+	return len;
+}
+
+static ssize_t smb349_float_voltage_store(struct device *dev,
+			struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
+	int value = simple_strtoul(buf, NULL, 10);
+
+	if (smb349_set_float_voltage(priv, value)) {
+		dev_err(priv->dev, "Unable to change float voltage\n");
+		return len;
+	}
+
+	return len;
+}
+
+static DEVICE_ATTR(float_voltage, S_IRUGO | S_IWUSR | S_IWGRP,
+				smb349_float_voltage_show,
+				smb349_float_voltage_store);
+
+
+static ssize_t smb349_otg_current_limit_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	ssize_t len = 0;
+	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
+
+	mutex_lock(&priv->lock);
+
+	len += sprintf(buf + len, "%d\n", priv->otg_current_limit);
+
+	mutex_unlock(&priv->lock);
+
+	return len;
+}
+
+static ssize_t smb349_otg_current_limit_store(struct device *dev,
+			struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
+	int value = simple_strtoul(buf, NULL, 10);
+
+	mutex_lock(&priv->lock);
+
+	if (smb349_otg_current_limit(priv, value)) {
+		dev_err(priv->dev, "Unable to change otg current limit\n");
+		goto done;
+	}
+done:
+	mutex_unlock(&priv->lock);
+
+	return len;
+}
+
+static DEVICE_ATTR(otg_current_limit, S_IRUGO | S_IWUSR | S_IWGRP,
+			smb349_otg_current_limit_show,
+			smb349_otg_current_limit_store);
 
 static ssize_t smb349_charge_enable_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
@@ -1934,221 +2569,6 @@ static DEVICE_ATTR(charge_enable, S_IRUGO | S_IWUSR | S_IWGRP,
 			smb349_charge_enable_show,
 			smb349_charge_enable_store);
 
-static ssize_t smb349_status_high_current_show(struct device *dev,
-			struct device_attribute *attr, char *buf)
-{
-	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
-	int error = 0, curr = 0;
-	ssize_t len = 0;
-	u8 value = 0xff;
-
-	mutex_lock(&priv->lock);
-
-	if ((error = smb349_i2c_read(priv->i2c_client,
-				SMB349_STATUS_REG_E, &value))) {
-		len += sprintf(buf + len,
-			"Error reading SMB349_STATUS_REG_E: %d\n", error);
-
-		goto done;
-	}
-
-	len += sprintf(buf + len, "SMB349_STATUS_REG_E = 0x%02x\n\n", value);
-	len += sprintf(buf + len, "Suspend Mode: %s\n",
-		(value & (1 << 7)) ? "Yes" : "No");
-
-	switch (SMB349_USB5CS_MODE(value)) {
-	case SMB349_HC_MODE:
-		len += sprintf(buf + len, "In HC mode\n");
-		break;
-	case SMB349_USB1_MODE:
-		len += sprintf(buf + len, "In USB1 mode\n");
-		break;
-	case SMB349_USB5_MODE:
-		len += sprintf(buf + len, "In USB5 mode\n");
-		break;
-	}
-
-	curr = smb349_aicl_current(value);
-
-	len += sprintf(buf + len,
-			"AICL Result = %d mA\n", curr);
-
-done:
-	mutex_unlock(&priv->lock);
-	return len;
-}
-
-static ssize_t smb349_status_high_current_store(struct device *dev,
-			struct device_attribute *attr, const char *buf, size_t len)
-{
-	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
-	int value = simple_strtoul(buf, NULL, 10);
-	int ret = -1;
-	u8 reg_value = 0xff;
-
-	printk("!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!\n");
-	printk("To set the charging current above 500mA in SDP mode may\n");
-	printk("casue serious consequences, such as but not limited to\n");
-	printk("disabled the host PC USB hub, burn out the host PC USB hub\n");
-	printk("and damaged host PC\n");
-	printk("USERS WILL SOLELY TAKE ALL RESPONSIBILITY AND LIABILITY\n");
-	printk("FOR ALL CONSEQUENCES BY USING THIS FEATURE\n");
-	printk("!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!\n");
-	printk("IF YOU ARE NOT SURE, PLEASE PLUG OUT THE USB CABLE\n");
-	printk("IMMEDIATELY! MUSTBE WITHIN 10 SECONDS!!!!\n");
-	msleep(10000);
-	mutex_lock(&priv->lock);
-	if (smb349_config(priv, 1)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-	msleep(200);
-	ret = smb349_i2c_read(priv->i2c_client,
-		SMB349_ENABLE_CONTROL, &reg_value);
-	if (ret) {
-		dev_err(priv->dev,
-			"%s: Unable to read SMB349_ENABLE_CONTROL: %d\n",
-			__func__, ret);
-		goto done;
-	}
-	msleep(200);
-	reg_value &= ~SMB349_USBCS_CONTROL;
-	msleep(200);
-	ret = smb349_i2c_write(priv->i2c_client,
-		SMB349_ENABLE_CONTROL, reg_value);
-
-	if (smb349_config(priv, 1)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-
-	if (value) {
-		smb349_switch_mode(priv, SMB349_USB_MODE_HC);
-	} else {
-		smb349_switch_mode(priv, SMB349_USB_MODE_5);
-	}
-
-	if (smb349_config(priv, 0)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-done:
-	if (smb349_config(priv, 0)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-	mutex_unlock(&priv->lock);
-	return len;
-}
-
-static DEVICE_ATTR(status_high_current, S_IRUGO | S_IWUSR | S_IWGRP,
-				smb349_status_high_current_show,
-				smb349_status_high_current_store);
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-static ssize_t smb349_status_float_voltage_show(struct device *dev,
-			struct device_attribute *attr, char *buf)
-{
-	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
-	int error = 0;
-	ssize_t len = 0;
-	u8 value = 0xff;
-	int float_voltage = 0;
-
-	mutex_lock(&priv->lock);
-
-	error = smb349_i2c_read(priv->i2c_client,
-				SMB349_FLOAT_VOLTAGE, &value);
-
-	if (error) {
-		len += snprintf(buf + len, 30,
-			"Error reading SMB349_FLOAT_VOLTAGE: %d\n", error);
-
-		goto done;
-	}
-
-	len += snprintf(buf + len, 30,
-			"SMB349_FLOAT_VOLTAGE = 0x%02x\n\n", value);
-
-	value &= 0x3F;
-	float_voltage = 346 + 2*value;
-
-	len += snprintf(buf + len, 30,
-			"Float Voltage == %d dV\n", float_voltage);
-
-done:
-	mutex_unlock(&priv->lock);
-	return len;
-}
-
-static ssize_t smb349_status_float_voltage_store(struct device *dev,
-			struct device_attribute *attr,
-			const char *buf, size_t len)
-{
-	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
-	int value = simple_strtoul(buf, NULL, 10);
-	int ret = -1;
-	u8 reg_value = 0xff;
-	int fv_value = 0;
-
-	if ((value > 472) || (value < 346)) {
-		dev_err(priv->dev, "Wrong value, the value must be 346 ~ 472\n");
-		return len;
-	}
-
-	mutex_lock(&priv->lock);
-	if (smb349_config(priv, 1)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-	msleep(200);
-	ret = smb349_i2c_read(priv->i2c_client,
-		SMB349_FLOAT_VOLTAGE, &reg_value);
-	if (ret) {
-		dev_err(priv->dev,
-			"%s: Unable to read SMB349_FLOAT_VOLTAGE: %d\n",
-			__func__, ret);
-		goto done;
-	}
-	msleep(200);
-	fv_value = (value - 346)/2;
-
-	reg_value &= 0xC0;
-	reg_value |= fv_value;
-
-	msleep(200);
-	ret = smb349_i2c_write(priv->i2c_client,
-		SMB349_FLOAT_VOLTAGE, reg_value);
-
-	if (smb349_config(priv, 1)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-
-	if (smb349_config(priv, 0)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-done:
-	if (smb349_config(priv, 0)) {
-		dev_err(priv->dev,
-			"Unable to enable writes to CONFIG regs\n");
-		goto done;
-	}
-	mutex_unlock(&priv->lock);
-	return len;
-}
-
-static DEVICE_ATTR(status_float_voltage, S_IRUGO | S_IWUSR | S_IWGRP,
-				smb349_status_float_voltage_show,
-				smb349_status_float_voltage_store);
-#endif
 static ssize_t smb349_suspend_mode_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
 {
@@ -2181,6 +2601,11 @@ static int smb349_suspend_mode(struct smb349_priv *priv, int enable)
 	int ret = -1;
 	unsigned char value = 0xff;
 
+        if (!enable && gpio_is_valid(priv->chrg_susp)){
+                gpio_set_value(priv->chrg_susp, 1);
+                msleep(10);
+	}
+
 	if ((ret = smb349_i2c_read(priv->i2c_client,
 			SMB349_COMMAND_REG_A, &value))) {
 		printk("%s: Unable to read SMB349_COMMAND_REG_A: %d\n",__FUNCTION__, ret);
@@ -2198,6 +2623,9 @@ static int smb349_suspend_mode(struct smb349_priv *priv, int enable)
 		printk("%s: Unable to write SMB349_COMMAND_REG_A: %d\n", __FUNCTION__, ret);
 		goto done;
 	}
+
+        if (enable && gpio_is_valid(priv->chrg_susp))
+                gpio_set_value(priv->chrg_susp, 0);
 
 	ret = 0;
 
@@ -2461,6 +2889,44 @@ static ssize_t smb349_usb_boot_det_show(struct device *dev,
 static DEVICE_ATTR(usb_boot_det, S_IRUGO,
 			smb349_usb_boot_det_show, NULL);
 
+static ssize_t smb349_APSD_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
+	int ret = 0;
+	ssize_t len = 0;
+	u8 value = 0xff;
+
+	mutex_lock(&priv->lock);
+
+	if ((ret = smb349_i2c_read(priv->i2c_client, SMB349_FUNCTIONS, &value))) {
+		len += sprintf(buf + len, "-1\n");
+		goto done;
+	}
+
+	len += sprintf(buf + len, (value & SMB349_FUNCTIONS_APSD_EN_MASK) ? "1\n" : "0\n");
+
+done:
+	mutex_unlock(&priv->lock);
+	return len;
+}
+
+static ssize_t smb349_APSD_store(struct device *dev,
+			struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct smb349_priv *priv = i2c_get_clientdata(to_i2c_client(dev));
+	unsigned int enable = simple_strtoul(buf, NULL, 10);
+
+	if (smb349_APSD_enable(priv, enable))
+		return -1;
+
+	return len;
+}
+
+static DEVICE_ATTR(APSD_enable, S_IRUGO | S_IWUGO,
+			smb349_APSD_show,
+			smb349_APSD_store);
+
 #ifdef SMB349_DEBUG
 static ssize_t smb349_config_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
@@ -2523,12 +2989,10 @@ static struct attribute *smb349_attrs[] = {
 	&dev_attr_status_c.attr,
 	&dev_attr_status_d.attr,
 	&dev_attr_status_e.attr,
-	&dev_attr_status_high_current.attr,
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-	&dev_attr_status_float_voltage.attr,
-#endif
 	&dev_attr_charge_current.attr,
 	&dev_attr_current_limit.attr,
+	&dev_attr_float_voltage.attr,
+	&dev_attr_otg_current_limit.attr,
 	&dev_attr_charge_enable.attr,
 	&dev_attr_suspend_mode.attr,
 	&dev_attr_complete_charge_timeout.attr,
@@ -2537,6 +3001,7 @@ static struct attribute *smb349_attrs[] = {
 	&dev_attr_therm_monitor.attr,
 	&dev_attr_bad_battery.attr,
 	&dev_attr_usb_boot_det.attr,
+	&dev_attr_APSD_enable.attr,
 #ifdef SMB349_DEBUG
 	&dev_attr_config.attr,
 #endif
@@ -2547,11 +3012,31 @@ static struct attribute_group smb349_attrs_group = {
 	.attrs = smb349_attrs,
 };
 
+static int smb_parse_dt(struct smb349_priv *priv)
+{
+	int rc;
+	struct device_node *node = priv->dev->of_node;
+
+	if (!node) {
+		dev_err(priv->dev, "device tree info. missing\n");
+		return -EINVAL;
+	}
+
+	rc = of_property_read_u32(node, "chrg_susp-gpio", &(priv->chrg_susp));
+	if (rc) {
+		dev_err(priv->dev, "Invalid chrg_susp-gpio\n");
+		priv->chrg_susp = -1;
+	}
+
+	return 0;
+}
+
 static int smb349_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
 	struct smb349_priv *priv = NULL;
 	struct power_supply *dwc3_usb = NULL;
+	struct power_supply *bq27x41 = NULL;
 	int ret = 0, chip_id = 0;
 
 	dwc3_usb = power_supply_get_by_name("usb");
@@ -2559,13 +3044,21 @@ static int smb349_probe(struct i2c_client *client,
 	if (!dwc3_usb) {
 		pr_err("USB supply not found deferring probe\n");
 		ret = -EPROBE_DEFER;
-		goto err4;
+		goto err5;
+	}
+
+
+	bq27x41 = power_supply_get_by_name("bq27x41");
+	if (!bq27x41) {
+		pr_err("Battery supply not found deferring probe\n");
+		ret = -EPROBE_DEFER;
+		goto err5;
 	}
 
 	if (!(priv = kzalloc(sizeof(*priv), GFP_KERNEL))) {
 		pr_err("Out of memory\n");
 		ret = -ENOMEM;
-		goto err4;
+		goto err5;
 	}
 
 	/* Set up I2C structs */
@@ -2578,6 +3071,24 @@ static int smb349_probe(struct i2c_client *client,
 	/* Set up dev pointer */
 	priv->dev = &client->dev;
 
+	ret = smb_parse_dt(priv);
+	if (ret) {
+		dev_err(&client->dev, "Couldn't parse DT nodes rc=%d\n", ret);
+		goto err4;
+	}
+
+	if (gpio_is_valid(priv->chrg_susp)){
+		ret = gpio_request(priv->chrg_susp, "smb349_chrg_susp");
+		if (ret) {
+			dev_err(&client->dev,
+				"gpio_request for chrg_susp-gpio %d failed rc=%d\n",
+				priv->chrg_susp, ret);
+			goto err4;
+		}
+		gpio_direction_output(priv->chrg_susp, 1);
+		msleep(10);
+	}
+
 	/* Check for device ID */
 	if (smb349_read_id(priv, &chip_id) < 0) {
 		pr_err("Unable to detect device ID\n");
@@ -2589,6 +3100,8 @@ static int smb349_probe(struct i2c_client *client,
 		 client->addr, chip_id);
 
 	priv->dwc3_usb = dwc3_usb;
+	priv->bq27x41 = bq27x41;
+	priv->charge_mode = CHARGE_MODE_NORMAL;
 
 	/* Set up and register the power_supply structs */
 	priv->ac.name = "smb349_ac";
@@ -2621,20 +3134,34 @@ static int smb349_probe(struct i2c_client *client,
 		goto err1;
 	}
 
+	priv->otg_current_limit = SMB349_DEFAULT_CUR_LIMIT;
+
 	/* Fixup any registers we want to */
 	smb349_config_fixup(priv);
+
+	ret = smb349_regulator_otg_host_init(priv);
+	if  (ret) {
+		dev_err(priv->dev,"Couldn't initialize smb349 regulator for USB host mode. rc=%d\n", ret);
+		goto err1;
+	}
+	ret = smb349_regulator_apsd_host_init(priv);
+	if  (ret) {
+		dev_err(priv->dev, "Couldn't initialize smb349 regulator for APSD contral. rc=%d\n", ret);
+		goto err1;
+	}
 
 	priv->current_limit = smb349_input_current_limits[ARRAY_SIZE(smb349_input_current_limits) - 1];
 
 	/* Init work */
 	INIT_DELAYED_WORK(&priv->irq_work, smb349_irq_worker);
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-	INIT_DELAYED_WORK(&priv->charge_work, smb349_charge_control_worker);
-#endif
+	INIT_DELAYED_WORK(&priv->charge_work, smb349_charge_worker);
+	INIT_DELAYED_WORK(&priv->otg_work, smb349_otg_worker);
+	wake_lock_init(&priv->irq_wake_lock, WAKE_LOCK_SUSPEND,
+			"smb349_irq");
+
 #ifdef CONFIG_AMAZON_METRICS_LOG
 	INIT_WORK(&priv->disconnect_log_work, smb349_disconnect_log_worker);
 #endif
-	INIT_WORK(&priv->fixup_work, smb349_fixup_worker);
 
 	/* Get the charger stat IRQ */
 	priv->chrg_stat = of_get_named_gpio_flags(priv->dev->of_node,
@@ -2644,7 +3171,7 @@ static int smb349_probe(struct i2c_client *client,
 	priv->chrg_en = of_get_named_gpio_flags(priv->dev->of_node,
 				"summit,smb349-chrg-en-gpio", 0, NULL);
 
-	if (priv->chrg_en < 0) {
+	if (!gpio_is_valid(priv->chrg_en)) {
 		dev_warn(priv->dev,
 			"Unable to determine charge enable GPIO\n");
 		priv->chrg_en = -1;
@@ -2653,10 +3180,19 @@ static int smb349_probe(struct i2c_client *client,
 		gpio_direction_output(priv->chrg_en, 0);
 	}
 
+	priv->apsd_trigger = of_get_named_gpio_flags(priv->dev->of_node, "summit,apsd-trigger", 0, NULL);
+	if (!gpio_is_valid(priv->apsd_trigger)) {
+		dev_warn(priv->dev, "Unable to determine waveform GPIO\n");
+		priv->apsd_trigger = -1;
+	} else {
+		gpio_request(priv->apsd_trigger, "apsd_trigger");
+		gpio_direction_output(priv->apsd_trigger, 0);
+	}
+
 	priv->chrg_hcs = of_get_named_gpio_flags(priv->dev->of_node,
 				"summit,smb349-chrg-hcs-gpio", 0, NULL);
 
-	if (priv->chrg_hcs < 0) {
+	if (!gpio_is_valid(priv->chrg_hcs)) {
 		dev_warn(priv->dev,
 			"Unable to determine charge HCS GPIO\n");
 		priv->chrg_hcs = -1;
@@ -2668,7 +3204,7 @@ static int smb349_probe(struct i2c_client *client,
 	priv->usb_boot_det = of_get_named_gpio_flags(priv->dev->of_node,
 				"summit,smb349-usb-boot-gpio", 0, NULL);
 
-	if (priv->usb_boot_det < 0) {
+	if (!gpio_is_valid(priv->usb_boot_det)) {
 		dev_warn(priv->dev,
 			"Unable to determine USB Boot GPIO\n");
 		priv->usb_boot_det = -1;
@@ -2679,7 +3215,7 @@ static int smb349_probe(struct i2c_client *client,
 
 	priv->chg_health = POWER_SUPPLY_HEALTH_GOOD;
 
-	if (priv->chrg_stat < 0)
+	if (!gpio_is_valid(priv->chrg_stat))
 		priv->polling_mode = 1;
 
 	if (priv->polling_mode) {
@@ -2696,7 +3232,7 @@ static int smb349_probe(struct i2c_client *client,
 				IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 				"smb349_irq", priv)) {
 			dev_err(priv->dev, "Unable to set up threaded IRQ\n");
-			goto err1;
+			goto err0;
 		}
 
 		enable_irq_wake(priv->irq);  /* this will make the irq wakeupable */
@@ -2704,22 +3240,22 @@ static int smb349_probe(struct i2c_client *client,
 		/* Check APSD status */
 		smb349_apsd_complete(priv);
 	}
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
-	charging_started = 0;
-	charge_mode = DEFAULT_CHARGE_MODE;
 
-#endif
 	return 0;
 
+err0:
+	sysfs_remove_group(&priv->dev->kobj, &smb349_attrs_group);
 err1:
 	power_supply_unregister(&priv->usb);
 err2:
 	power_supply_unregister(&priv->ac);
 err3:
-	i2c_set_clientdata(client, NULL);
+	if (gpio_is_valid(priv->chrg_susp))
+		gpio_free(priv->chrg_susp);
 err4:
+	i2c_set_clientdata(client, NULL);
 	kfree(priv);
-
+err5:
 	return ret;
 }
 
@@ -2746,10 +3282,10 @@ static int smb349_remove(struct i2c_client *client)
 		free_irq(priv->irq, priv);
 
 	cancel_delayed_work_sync(&priv->irq_work);
-#if defined(CONFIG_ARCH_MSM8974_APOLLO)
 	cancel_delayed_work_sync(&priv->charge_work);
-#endif
-	cancel_work_sync(&priv->fixup_work);
+	cancel_delayed_work_sync(&priv->otg_work);
+
+	wake_lock_destroy(&priv->irq_wake_lock);
 
 	sysfs_remove_group(&priv->dev->kobj, &smb349_attrs_group);
 
@@ -2768,6 +3304,21 @@ static void smb349_shutdown(struct i2c_client *client)
 	struct smb349_priv *priv = i2c_get_clientdata(client);
 
 	dev_info(priv->dev, "shutdown\n");
+
+	if (priv->otg_vreg.rdev)
+		smb349_chg_otg_host_regulator_disable(priv->otg_vreg.rdev);
+
+	if (priv->apsd_ctrl.rdev &&
+		smb349_chg_apsd_host_regulator_is_enable(priv->apsd_ctrl.rdev))
+		smb349_chg_apsd_host_regulator_disable(priv->apsd_ctrl.rdev);
+
+	/* Trigger charge mode if cable is plugged in */
+	if (atomic_read(&priv->ac_online) ||
+		atomic_read(&priv->usb_online)) {
+		dev_info(priv->dev, "Going to charge mode\n");
+		qpnp_pon_charge_mode_enable();
+	}
+
 	smb349_remove(client);
 
 	return;
@@ -2777,7 +3328,7 @@ static int smb349_suspend(struct i2c_client *client, pm_message_t mesg)
 {
 	struct smb349_priv *priv = i2c_get_clientdata(client);
 
-	dev_info(priv->dev, "Entering suspend, event = 0x%04x\n", mesg.event);
+	dev_dbg(priv->dev, "Entering suspend, event = 0x%04x\n", mesg.event);
 
 	if (priv->handle_irq) {
 		dev_info(priv->dev, "%s: Pending interrupt handler, exiting\n",
@@ -2786,11 +3337,16 @@ static int smb349_suspend(struct i2c_client *client, pm_message_t mesg)
 	}
 
 	cancel_delayed_work_sync(&priv->irq_work);
-	cancel_work_sync(&priv->fixup_work);
+
+	/* Don't suspend chip if charger is attached (to handle interrupts) */
+	if (gpio_is_valid(priv->chrg_susp) && !atomic_read(&priv->ac_online)) {
+		dev_dbg(priv->dev, "Suspending smb349\n");
+		gpio_set_value(priv->chrg_susp, 0);
+	}
 
 	atomic_inc(&priv->suspended);
 
-	dev_info(priv->dev, "Finishing suspend\n");
+	dev_dbg(priv->dev, "Finishing suspend\n");
 
 	return 0;
 }
@@ -2801,12 +3357,21 @@ static int smb349_resume(struct i2c_client *client)
 
 	atomic_dec(&priv->suspended);
 
+        if (gpio_is_valid(priv->chrg_susp)) {
+		gpio_set_value(priv->chrg_susp, 1);
+		msleep(10);
+	}
+
+	if (priv->apsd_disabled) {
+		smb349_APSD_enable(priv, 0);
+	}
+
 	if (priv->polling_mode)
 		schedule_delayed_work(&priv->irq_work, msecs_to_jiffies(1000));
-	else if (priv->handle_irq)
+	else if (priv->handle_irq || atomic_read(&priv->ac_online))
 		schedule_delayed_work(&priv->irq_work, 0);
 
-	dev_info(priv->dev, "Finishing resume\n");
+	dev_dbg(priv->dev, "Finishing resume\n");
 
 	return 0;
 }
@@ -2814,6 +3379,7 @@ static int smb349_resume(struct i2c_client *client)
 static unsigned short normal_i2c[] = { SMB349_I2C_ADDRESS, I2C_CLIENT_END };
 
 static const struct of_device_id smb349_match[] = {
+	{ .compatible = "qcom,smb349-charger", },
 	{ .compatible = "summit,smb349", },
 	{ },
 };
@@ -2821,7 +3387,7 @@ static const struct of_device_id smb349_match[] = {
 static struct i2c_driver smb349_i2c_driver = {
 	.driver = {
 		.name = "smb349",
-		.of_match_table = of_match_ptr(smb349_match),
+		.of_match_table = smb349_match,
 	},
 	.probe = smb349_probe,
 	.remove = smb349_remove,

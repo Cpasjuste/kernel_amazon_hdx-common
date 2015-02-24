@@ -52,6 +52,7 @@ static DEFINE_MUTEX(deferred_probe_mutex);
 static LIST_HEAD(deferred_probe_pending_list);
 static LIST_HEAD(deferred_probe_active_list);
 static struct workqueue_struct *deferred_wq;
+static atomic_t deferred_trigger_count = ATOMIC_INIT(0);
 
 /**
  * deferred_probe_work_func() - Retry probing devices in the active list.
@@ -86,8 +87,20 @@ static void deferred_probe_work_func(struct work_struct *work)
 		 * manipulate the deferred list
 		 */
 		mutex_unlock(&deferred_probe_mutex);
+
+		/*
+		 * Force the device to the end of the dpm_list since
+		 * the PM code assumes that the order we add things to
+		 * the list is a good order for suspend but deferred
+		 * probe makes that very unsafe.
+		 */
+		device_pm_lock();
+		device_pm_move_last(dev);
+		device_pm_unlock();
+
 		dev_dbg(dev, "Retrying from deferred list\n");
 		bus_probe_device(dev);
+
 		mutex_lock(&deferred_probe_mutex);
 
 		put_device(dev);
@@ -101,7 +114,7 @@ static void driver_deferred_probe_add(struct device *dev)
 	mutex_lock(&deferred_probe_mutex);
 	if (list_empty(&dev->p->deferred_probe)) {
 		dev_dbg(dev, "Added to deferred list\n");
-		list_add(&dev->p->deferred_probe, &deferred_probe_pending_list);
+		list_add_tail(&dev->p->deferred_probe, &deferred_probe_pending_list);
 	}
 	mutex_unlock(&deferred_probe_mutex);
 }
@@ -123,6 +136,17 @@ static bool driver_deferred_probe_enable = false;
  * This functions moves all devices from the pending list to the active
  * list and schedules the deferred probe workqueue to process them.  It
  * should be called anytime a driver is successfully bound to a device.
+ *
+ * Note, there is a race condition in multi-threaded probe. In the case where
+ * more than one device is probing at the same time, it is possible for one
+ * probe to complete successfully while another is about to defer. If the second
+ * depends on the first, then it will get put on the pending list after the
+ * trigger event has already occured and will be stuck there.
+ *
+ * The atomic 'deferred_trigger_count' is used to determine if a successful
+ * trigger has occurred in the midst of probing a driver. If the trigger count
+ * changes in the midst of a probe, then deferred processing should be triggered
+ * again.
  */
 static void driver_deferred_probe_trigger(void)
 {
@@ -135,6 +159,7 @@ static void driver_deferred_probe_trigger(void)
 	 * into the active list so they can be retried by the workqueue
 	 */
 	mutex_lock(&deferred_probe_mutex);
+	atomic_inc(&deferred_trigger_count);
 	list_splice_tail_init(&deferred_probe_pending_list,
 			      &deferred_probe_active_list);
 	mutex_unlock(&deferred_probe_mutex);
@@ -146,24 +171,49 @@ static void driver_deferred_probe_trigger(void)
 	queue_work(deferred_wq, &deferred_probe_work);
 }
 
+static void enable_trigger_defer_cycle(void)
+{
+	driver_deferred_probe_enable = true;
+	driver_deferred_probe_trigger();
+	/*
+	 * Sort as many dependencies as possible before the next initcall
+	 * level
+	 */
+	flush_workqueue(deferred_wq);
+}
+
 /**
  * deferred_probe_initcall() - Enable probing of deferred devices
  *
  * We don't want to get in the way when the bulk of drivers are getting probed.
  * Instead, this initcall makes sure that deferred probing is delayed until
- * late_initcall time.
+ * all the registered initcall functions at a particular level are completed.
+ * This function is invoked at every *_initcall_sync level.
  */
 static int deferred_probe_initcall(void)
 {
-	deferred_wq = create_singlethread_workqueue("deferwq");
-	if (WARN_ON(!deferred_wq))
-		return -ENOMEM;
+	if (!deferred_wq) {
+		deferred_wq = create_singlethread_workqueue("deferwq");
+		if (WARN_ON(!deferred_wq))
+			return -ENOMEM;
+	}
 
-	driver_deferred_probe_enable = true;
-	driver_deferred_probe_trigger();
+	enable_trigger_defer_cycle();
+	driver_deferred_probe_enable = false;
 	return 0;
 }
-late_initcall(deferred_probe_initcall);
+arch_initcall_sync(deferred_probe_initcall);
+subsys_initcall_sync(deferred_probe_initcall);
+fs_initcall_sync(deferred_probe_initcall);
+device_initcall_sync(deferred_probe_initcall);
+
+static int deferred_probe_enable_fn(void)
+{
+	/* Enable deferred probing for all time */
+	enable_trigger_defer_cycle();
+	return 0;
+}
+late_initcall(deferred_probe_enable_fn);
 
 static void driver_bound(struct device *dev)
 {
@@ -251,6 +301,7 @@ static DECLARE_WAIT_QUEUE_HEAD(probe_waitqueue);
 static int really_probe(struct device *dev, struct device_driver *drv)
 {
 	int ret = 0;
+	int local_trigger_count = atomic_read(&deferred_trigger_count);
 
 	atomic_inc(&probe_count);
 	pr_debug("bus: '%s': %s: probing driver %s with device %s\n",
@@ -290,11 +341,15 @@ probe_failed:
 	devres_release_all(dev);
 	driver_sysfs_remove(dev);
 	dev->driver = NULL;
+	dev_set_drvdata(dev, NULL);
 
 	if (ret == -EPROBE_DEFER) {
 		/* Driver requested deferred probing */
 		dev_info(dev, "Driver %s requests probe deferral\n", drv->name);
 		driver_deferred_probe_add(dev);
+		/* Did a trigger occur while probing? Need to re-trigger if yes */
+		if (local_trigger_count != atomic_read(&deferred_trigger_count))
+			driver_deferred_probe_trigger();
 	} else if (ret != -ENODEV && ret != -ENXIO) {
 		/* driver matched but the probe failed */
 		printk(KERN_WARNING
@@ -363,10 +418,9 @@ int driver_probe_device(struct device_driver *drv, struct device *dev)
 	pr_debug("bus: '%s': %s: matched device %s with driver %s\n",
 		 drv->bus->name, __func__, dev_name(dev), drv->name);
 
-	pm_runtime_get_noresume(dev);
 	pm_runtime_barrier(dev);
 	ret = really_probe(dev, drv);
-	pm_runtime_put_sync(dev);
+	pm_request_idle(dev);
 
 	return ret;
 }
@@ -413,9 +467,8 @@ int device_attach(struct device *dev)
 			ret = 0;
 		}
 	} else {
-		pm_runtime_get_noresume(dev);
 		ret = bus_for_each_drv(dev->bus, NULL, dev, __device_attach);
-		pm_runtime_put_sync(dev);
+		pm_request_idle(dev);
 	}
 out_unlock:
 	device_unlock(dev);
@@ -494,6 +547,7 @@ static void __device_release_driver(struct device *dev)
 			drv->remove(dev);
 		devres_release_all(dev);
 		dev->driver = NULL;
+		dev_set_drvdata(dev, NULL);
 		klist_remove(&dev->p->knode_driver);
 		if (dev->bus)
 			blocking_notifier_call_chain(&dev->bus->p->bus_notifier,

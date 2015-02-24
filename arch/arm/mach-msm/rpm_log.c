@@ -1,4 +1,5 @@
-/* Copyright (c) 2010-2011, 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2011, 2013-2014, The Linux Foundation.
+ * All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,8 +25,6 @@
 #include <linux/types.h>
 
 #include <asm/uaccess.h>
-
-#include <mach/msm_iomap.h>
 
 #include "rpm_log.h"
 
@@ -269,7 +268,7 @@ static int msm_rpm_log_file_open(struct inode *inode, struct file *file)
 	file->private_data =
 		   kmalloc(sizeof(struct msm_rpm_log_buffer), GFP_KERNEL);
 	if (!file->private_data) {
-		pr_err("%s: ERROR kmalloc failed to allocate %d bytes\n",
+		pr_err("%s: ERROR kmalloc failed to allocate %zu bytes\n",
 			__func__, sizeof(struct msm_rpm_log_buffer));
 		return -ENOMEM;
 	}
@@ -308,7 +307,7 @@ static const struct file_operations msm_rpm_log_file_fops = {
 	.release = msm_rpm_log_file_close,
 };
 
-static int __devinit msm_rpm_log_probe(struct platform_device *pdev)
+static int msm_rpm_log_probe(struct platform_device *pdev)
 {
 	struct dentry *dent;
 	struct msm_rpm_log_platform_data *pdata;
@@ -339,8 +338,8 @@ static int __devinit msm_rpm_log_probe(struct platform_device *pdev)
 		pdata->reg_base = ioremap_nocache(pdata->phys_addr_base,
 					pdata->phys_size);
 		if (!pdata->reg_base) {
-			pr_err("%s: ERROR could not ioremap: start=%p, len=%u\n",
-				__func__, (void *) pdata->phys_addr_base,
+			pr_err("%s: ERROR could not ioremap: start=%pa, len=%u\n",
+				__func__, &pdata->phys_addr_base,
 				pdata->phys_size);
 			kfree(pdata);
 			return -EBUSY;
@@ -449,8 +448,8 @@ static int __devinit msm_rpm_log_probe(struct platform_device *pdev)
 		pdata->reg_base = ioremap(pdata->phys_addr_base,
 				pdata->phys_size);
 		if (!pdata->reg_base) {
-			pr_err("%s: ERROR could not ioremap: start=%p, len=%u\n",
-				__func__, (void *) pdata->phys_addr_base,
+			pr_err("%s: ERROR could not ioremap: start=%pa, len=%u\n",
+				__func__, &pdata->phys_addr_base,
 				pdata->phys_size);
 			return -EBUSY;
 		}
@@ -478,7 +477,7 @@ fail:
 	return ret;
 }
 
-static int __devexit msm_rpm_log_remove(struct platform_device *pdev)
+static int msm_rpm_log_remove(struct platform_device *pdev)
 {
 	struct dentry *dent;
 	struct msm_rpm_log_platform_data *pdata;
@@ -502,7 +501,7 @@ static struct of_device_id rpm_log_table[] = {
 
 static struct platform_driver msm_rpm_log_driver = {
 	.probe		= msm_rpm_log_probe,
-	.remove		= __devexit_p(msm_rpm_log_remove),
+	.remove		= msm_rpm_log_remove,
 	.driver		= {
 		.name = "msm_rpm_log",
 		.owner = THIS_MODULE,

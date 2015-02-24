@@ -84,6 +84,7 @@ struct snd_compr_stream {
 	bool metadata_set;
 	bool next_track;
 	void *private_data;
+	struct snd_soc_pcm_runtime *be;
 };
 
 /**
@@ -171,6 +172,15 @@ void snd_compress_free(struct snd_card *card, struct snd_compr *compr);
  */
 static inline void snd_compr_fragment_elapsed(struct snd_compr_stream *stream)
 {
+	wake_up(&stream->runtime->sleep);
+}
+
+static inline void snd_compr_drain_notify(struct snd_compr_stream *stream)
+{
+	if (snd_BUG_ON(!stream))
+		return;
+
+	stream->runtime->state = SNDRV_PCM_STATE_SETUP;
 	wake_up(&stream->runtime->sleep);
 }
 

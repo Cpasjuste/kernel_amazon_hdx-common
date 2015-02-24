@@ -6,16 +6,16 @@
 #include <linux/ioctl.h>
 
 #define MSM_CAM_V4L2_IOCTL_NOTIFY \
-	_IOW('V', BASE_VIDIOC_PRIVATE + 30, struct v4l2_event)
+	_IOW('V', BASE_VIDIOC_PRIVATE + 30, struct msm_v4l2_event_data)
 
 #define MSM_CAM_V4L2_IOCTL_NOTIFY_META \
-	_IOW('V', BASE_VIDIOC_PRIVATE + 31, struct v4l2_event)
+	_IOW('V', BASE_VIDIOC_PRIVATE + 31, struct msm_v4l2_event_data)
 
 #define MSM_CAM_V4L2_IOCTL_CMD_ACK \
-	_IOW('V', BASE_VIDIOC_PRIVATE + 32, struct v4l2_event)
+	_IOW('V', BASE_VIDIOC_PRIVATE + 32, struct msm_v4l2_event_data)
 
 #define MSM_CAM_V4L2_IOCTL_NOTIFY_ERROR \
-	_IOW('V', BASE_VIDIOC_PRIVATE + 33, struct v4l2_event)
+	_IOW('V', BASE_VIDIOC_PRIVATE + 33, struct msm_v4l2_event_data)
 
 #define QCAMERA_DEVICE_GROUP_ID	1
 #define QCAMERA_VNODE_GROUP_ID	2
@@ -36,16 +36,9 @@
 #define MSM_CAMERA_SUBDEV_LED_FLASH    11
 #define MSM_CAMERA_SUBDEV_STROBE_FLASH 12
 #define MSM_CAMERA_SUBDEV_BUF_MNGR     13
-#define MSM_CAMERA_SUBDEV_OIS          14
+#define MSM_CAMERA_SUBDEV_SENSOR_INIT  14
 
 #define MSM_MAX_CAMERA_SENSORS  5
-
-/* The below macro is defined to put an upper limit on maximum
- * number of buffer requested per stream. In case of extremely
- * large value for number of buffer due to data structure corruption
- * we return error to avoid integer overflow. This value may be
- * configured in future*/
-#define MSM_CAMERA_MAX_STREAM_BUF 40
 
 /* The below macro is defined to put an upper limit on maximum
  * number of buffer requested per stream. In case of extremely
@@ -92,112 +85,6 @@
 #define MSM_CAMERA_PRIV_STREAM_INFO_SYNC \
 	(V4L2_CID_PRIVATE_BASE + 13)
 
-#define OV680_PRIV_BASE V4L2_CID_PRIVATE_BASE + 100
-
-/* Lab126 specific structs for IOCTLs */
-
-struct ov680_roi {
-       uint32_t  isp_idx;
-       uint32_t  sensor_idx;
-       uint8_t  zone_weight[4][4];
-};
-
-struct ov680_exposure {
-        uint32_t sensor_idx;
-        uint32_t exposure;
-};
-
-struct ov680_gain {
-        uint32_t sensor_idx;
-        uint32_t gain;
-};
-
-#define MSM_SENSOR_METADATA_MAGIC 0xC0DEBABA
-
-struct msm_sensor_metadata {
-        uint32_t magic; /* must be the first field always*/
-        uint32_t input;
-        uint32_t output_format;
-        uint16_t  exposure1; /* usec, sensor exposure for whole frame or left subframe (side by side layout) */
-        uint16_t  exposure2; /* usec, sensor exposure for right subframe */
-        uint16_t  gain1; /* sensor gain for whole frame or left subframe (side by side layout) */
-        uint16_t  gain2; /* sensor gain for right subframe */
-        uint32_t  frame_rate;
-        union {
-            uint32_t flags;
-            struct {
-                uint32_t AEC_on : 1;
-                uint32_t AGC_on : 1;
-		/* the following bits indicate if  the async IOCTL calls have failed */
-                uint32_t exposure_failed : 1;
-                uint32_t gain_failed : 1;
-                uint32_t flash_duration_failed : 1;
-                uint32_t flash_current_failed : 1;
-            };
-        };
-	uint16_t flash_duration; /* usec, duration of flash for all sensors */
-	uint16_t flash_current[4]; /* mA, current of flash for each sensor */
-};
-
-struct ov680_irled_config {
-        uint32_t flash_current[4];
-        uint32_t duration;
-};
-
-struct ov680_irled_max_current_req {
-	/* These will be filled in by the user request */
-        uint32_t frame_rate;
-        uint32_t duration;
-	/* This will be filled in by the driver */
-	uint32_t max_current;
-};
-
-/* Lab126 specific IOCTLs */
-
-#define BASE_VIDIOC_LAB126 BASE_VIDIOC_PRIVATE + 100
-
-#define VIDIOC_OV680_SENSOR_SET_ROI \
-        _IOW('V', BASE_VIDIOC_LAB126, struct ov680_roi)
-
-#define VIDIOC_OV680_SENSOR_SET_EXPOSURE\
-        _IOW('V', BASE_VIDIOC_LAB126 + 1, struct ov680_exposure)
-
-#define VIDIOC_OV680_SENSOR_SET_GAIN\
-        _IOW('V', BASE_VIDIOC_LAB126 + 2, struct ov680_gain)
-
-#define VIDIOC_OV680_SENSOR_SET_CTRL\
-        _IOW('V', BASE_VIDIOC_LAB126 + 3, struct v4l2_control)
-
-#define VIDIOC_SENSOR_GET_METADATA\
-        _IOW('V', BASE_VIDIOC_LAB126 + 4, struct msm_sensor_metadata)
-
-#define VIDIOC_OV680_SENSOR_LOAD_FIRMWARE\
-        _IO('V', BASE_VIDIOC_LAB126 + 5)
-
-#define VIDIOC_OV680_SENSOR_SET_IRLED_CONFIG\
-        _IOW('V', BASE_VIDIOC_LAB126 + 6, struct ov680_irled_config)
-
-#define VIDIOC_OV680_SENSOR_REQUEST_FIRMWARE\
-        _IO('V', BASE_VIDIOC_LAB126 + 7)
-
-#define ISPIF_FRAME_EVENT_BASE BASE_VIDIOC_LAB126 + 8
-
-#define VIDIOC_OV680_SENSOR_GET_IRLED_MAX_CURRENT\
-        _IO('V', BASE_VIDIOC_LAB126 + 9)
-
-
-/* Lab126 specific sensor controls */
-
-#define MSM_V4L2_PID_OV680_SENSOR_FRAME_MODE  (OV680_PRIV_BASE+0)
-#define MSM_V4L2_PID_OV680_AEC_AGC_MODE       (OV680_PRIV_BASE+1)
-#define MSM_V4L2_PID_OV680_AEC_AGC_TARGET     (OV680_PRIV_BASE+2)
-#define MSM_V4L2_PID_OV680_FPS                (OV680_PRIV_BASE+3)
-#define MSM_V4L2_PID_OV680_SENSOR_ISP_CONFIG  (OV680_PRIV_BASE+4)
-#define MSM_V4L2_PID_OV680_SENSOR_LENC_CONFIG (OV680_PRIV_BASE+5)
-#define MSM_V4L2_PID_OV680_SENSOR_DPC_CONFIG  (OV680_PRIV_BASE+6)
-
-#define  OV680_PRIV_MAX MSM_V4L2_PID_OV680_SENSOR_DPC_CONFIG
-
 /* data.status - success */
 #define MSM_CAMERA_CMD_SUCESS      0x00000001
 #define MSM_CAMERA_BUF_MAP_SUCESS  0x00000002
@@ -230,9 +117,9 @@ struct msm_v4l2_event_data {
 	/*word 8*/
 	unsigned int ret_value;
 	/*word 9*/
-	unsigned int nop3;
+	unsigned int v4l2_event_type;
 	/*word 10*/
-	unsigned int nop4;
+	unsigned int v4l2_event_id;
 	/*word 11*/
 	unsigned int nop5;
 	/*word 12*/
@@ -280,5 +167,15 @@ struct msm_v4l2_format_data {
 #define MSM_V4L2_PIX_FMT_STATS_BF   v4l2_fourcc('S', 'T', 'B', 'F')
 /* Bayer hist stats */
 #define MSM_V4L2_PIX_FMT_STATS_BHST v4l2_fourcc('B', 'H', 'S', 'T')
+
+enum smmu_attach_mode {
+	NON_SECURE_MODE,
+	SECURE_MODE,
+	MAX_PROTECTION_MODE,
+};
+
+struct msm_camera_smmu_attach_type {
+	enum smmu_attach_mode attach;
+};
 
 #endif /* __LINUX_MSMB_CAMERA_H */

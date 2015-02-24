@@ -1,7 +1,8 @@
 /*
  * bwan.c  --  WAN hardware control driver
  *
- * Copyright 2005-2013 Lab126, Inc.  All rights reserved.
+ * Copyright (c) 2005-2014 Lab126, Inc/Amazon Technologies Inc.
+ *   All rights reserved.
  *
  */
 
@@ -43,20 +44,13 @@
 #define MAX_RETRY_COUNT 		3
 #define BWAN_WAKE_LOCK_TIMEOUT_SEC	(30 * HZ)
 
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-/* GPIO PINs related to modem */
-#define BWAN_HMI             81
-#define BWAN_MHI             82
-#define BWAN_FW_READY        54
-#define BWAN_USB_EN          53
-#define BWAN_SHUTDOWN        49
-#define BWAN_ON_OFF          78
-#define BWAN_SIM_DETECT      100
-
 /* IOCTL command codes and macros */
 #define BWAN_CODE	0xAA
-#define BWAN_EHCI_RESET	_IO(BWAN_CODE, 1) 
-#endif
+#define BWAN_EHCI_RESET	_IO(BWAN_CODE, 1)
+
+#define PRODUCT_BOARD_ID_LEN 16
+#define PRODUCT_BOARD_REV_BYTE_INDEX 8
+#define PRODUCT_BOARD_DVT_BYTE_VALUE '5'
 
 static DEFINE_MUTEX(bwan_status_lock);
 
@@ -70,7 +64,7 @@ static int gpio_wan_fw_rdy = GPIO_INVALID;
 static int bwan_fw_rdy_status = -1;
 static int gpio_wan_sim_present = GPIO_INVALID;
 static int bwan_sim_present_status = -1;
-static int bwan_sim_present_invert = 0;
+static int bwan_sim_present_invert = 1;
 static int bwan_power_gpio_invert = 1;
 
 static struct kobject *bwan_kobj;
@@ -79,11 +73,6 @@ static struct kset *bwan_kset;
 static wait_queue_head_t bwan_waitq;
 
 static struct wake_lock bwan_lock;
-
-static struct device_node *ehci_hcd_node;
-static struct platform_device *ehci_hcd_pdev;
-
-static struct work_struct bwan_work;
 
 #define bwan_pulse_gpio_wan_on(hold_time)			\
 do {								\
@@ -127,28 +116,48 @@ do {								\
 	}							\
 } while (0)
 
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-static struct gpiomux_setting gpio_fw_rdy = {
-	.func = GPIOMUX_FUNC_GPIO,
-	.drv  = GPIOMUX_DRV_2MA,
-	.pull = GPIOMUX_PULL_DOWN,
+#if defined(CONFIG_ARCH_APQ8084_LOKI) || defined(CONFIG_ARCH_APQ8084_SATURN)
+#define SIM_DETECT_GPIO_CFG_IDX 0
+
+static struct gpiomux_setting gpio_sim_present = {
+        .func = GPIOMUX_FUNC_GPIO,
+        .drv  = GPIOMUX_DRV_2MA,
+        .pull = GPIOMUX_PULL_UP,
 };
 
 static struct msm_gpiomux_config bwan_gpio_configs[] = {
-	{
-		.gpio = BWAN_FW_READY,
-		.settings = {
-			[GPIOMUX_ACTIVE] = &gpio_fw_rdy,
-			[GPIOMUX_SUSPENDED] = &gpio_fw_rdy,
-		},
-	}
+        {
+                .gpio =  GPIO_INVALID,
+                .settings = {
+                        [GPIOMUX_ACTIVE] = &gpio_sim_present,
+                        [GPIOMUX_SUSPENDED] = &gpio_sim_present,
+                },
+        }
 };
 #endif
 
+
+bool is_sim_detection_invert(void)
+{
+	struct device_node *ap;
+	int len;
+
+	ap = of_find_node_by_path("/idme/board_id");
+	if (ap) {
+	const char *boardid = of_get_property(ap, "value", &len);
+		if (len >= PRODUCT_BOARD_ID_LEN) {
+			if (boardid[PRODUCT_BOARD_REV_BYTE_INDEX] < PRODUCT_BOARD_DVT_BYTE_VALUE)
+				return true;
+		}
+	}
+	return false;
+}
+
 static void bwan_request_gpio(void)
 {
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-	msm_gpiomux_install(bwan_gpio_configs, ARRAY_SIZE(bwan_gpio_configs));
+#if defined(CONFIG_ARCH_APQ8084_LOKI) || defined(CONFIG_ARCH_APQ8084_SATURN)
+        bwan_gpio_configs[SIM_DETECT_GPIO_CFG_IDX].gpio = gpio_wan_sim_present;
+        msm_gpiomux_install(bwan_gpio_configs, ARRAY_SIZE(bwan_gpio_configs));
 #endif
 	gpio_request(gpio_wan_on, "Power_On");
 	gpio_request(gpio_wan_shutdown, "Power_Shutdown");
@@ -204,10 +213,11 @@ static inline int bwan_on(int retry_count)
 				retval);
 
 		if (retval > 0) {
-			if (!bwan_fw_rdy_status)
+			if (!bwan_fw_rdy_status) {
 				printk ("fw_rdy_status is not set\n");
-			else
-				printk ("Received FW ready\n");
+			} else {
+				printk ("Received FW ready - BWAN_HMI=0\n");
+			}
 			break;
 		} else {
 			printk ("Yet to receive FW ready..\n");
@@ -246,14 +256,16 @@ static ssize_t bwan_power_store(struct kobject *kobj,
 
 	switch (var) {
 		case 2:
+			/* Restart modem */
 			wake_lock_timeout(&bwan_lock, BWAN_WAKE_LOCK_TIMEOUT_SEC);
 			bwan_pulse_gpio_wan_shutdown(POWER_OFF_HOLD_TIME);
 
 			/* At this point, the modem is shutdown.
 			   Initiate the power up sequence */
 			retval = bwan_on(retry_count);
-			if (retval <= 0)
+			if (retval <= 0) {
 				printk ("Modem reset was not successful\n");
+			}
 
 			/*
 			 * Set the status to ON even though we didn't receive
@@ -265,14 +277,15 @@ static ssize_t bwan_power_store(struct kobject *kobj,
 
 		case 1:
 			/* Initiate the power up sequence */
-
-			if (bwan_power == HIGH)
+			if (bwan_power == HIGH) {
 				break;
+			}
 
 			wake_lock_timeout(&bwan_lock, BWAN_WAKE_LOCK_TIMEOUT_SEC);
 
-			if (bwan_fw_rdy_status == -1)
+			if (bwan_fw_rdy_status == -1) {
 				bwan_fw_rdy_status = 0;
+			}
 
 			retval = bwan_on(retry_count);
 
@@ -284,8 +297,9 @@ static ssize_t bwan_power_store(struct kobject *kobj,
 
 			break;
 		case 0:
-			if (bwan_power == LOW)
+			if (bwan_power == LOW) {
 				break;
+			}
 
 			bwan_pulse_gpio_wan_shutdown(POWER_OFF_HOLD_TIME);
 			bwan_power = LOW;
@@ -301,8 +315,9 @@ static ssize_t bwan_usb_en_show(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		char *buf)
 {
-	if (strcmp(attr->attr.name, "usben"))
+	if (strcmp(attr->attr.name, "usben")) {
 		return -1;
+	}
 
 	return sprintf(buf, "%d", bwan_usb_en);
 }
@@ -316,21 +331,24 @@ static ssize_t bwan_usb_en_store(struct kobject *kobj,
 
 	sscanf(buf, "%du", &var);
 
-	if (strcmp(attr->attr.name, "usben"))
+	if (strcmp(attr->attr.name, "usben")) {
 		return -1;
+	}
 
 	printk("%s: Received option %d from wankit\n", __func__, var);
 
 	switch (var) {
 		case 1:
-			if (bwan_usb_en == HIGH)
+			if (bwan_usb_en == HIGH) {
 				break;
+			}
 			bwan_gpio_wan_usb_en(HIGH);
 			bwan_usb_en = HIGH;
 			break;
 		case 0:
-			if (bwan_usb_en == LOW)
+			if (bwan_usb_en == LOW) {
 				break;
+			}
 			bwan_gpio_wan_usb_en(LOW);
 			bwan_usb_en = LOW;
 			break;
@@ -345,73 +363,20 @@ static ssize_t bwan_fw_rdy_show(struct kobject *kobj,
 		    struct kobj_attribute *attr,
 		    char *buf)
 {
-	if (strcmp(attr->attr.name, "fw_rdy"))
+	if (strcmp(attr->attr.name, "fw_rdy")) {
 		return -1;
+	}
 
 	return sprintf(buf, "%d", bwan_fw_rdy_status);
 }
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-int bwan_usb_reset = 0;
-
-static ssize_t bwan_usb_reset_store(struct kobject *kobj,
-				struct kobj_attribute *attr,
-				const char *buf,
-				size_t count)
-{
-	int var;
-	int ret;
-	sscanf(buf, "%du", &var);
-
-	if (strcmp(attr->attr.name, "usb_reset"))
-		return -1;
-
-	switch (var) {
-		case 1:
-			if (bwan_usb_reset == HIGH)
-				break;
-			bwan_usb_reset = HIGH;
-
-			/* Disable USB */
-			gpio_direction_output(gpio_wan_usb_en, 0);
-
-			/* Power off the modem */
-			bwan_pulse_gpio_wan_shutdown(POWER_OFF_HOLD_TIME);
-			msleep(1000);
-
-			ret = bwan_on(3);
-			msleep(1000);
-			gpio_direction_output(gpio_wan_usb_en, 1);
-			if (ret)
-				printk("%s: Modem powered up\n", __func__);
-			else
-				printk("%s: Modem didn't power up\n", __func__);
-			bwan_usb_reset = LOW;
-			break;
-		default:
-			printk("Invalid input\n");
-	}
-
-	return count;
-}
-
-static ssize_t bwan_usb_reset_show(struct kobject *kobj,
-		    struct kobj_attribute *attr,
-		    char *buf)
-{
-	if (strcmp(attr->attr.name, "usb_reset"))
-		return -1;
-
-	return sprintf(buf, "%d", bwan_usb_reset);
-}
-#endif
 
 static ssize_t bwan_sim_present_show(struct kobject *kobj,
 			struct kobj_attribute *attr,
 			char *buf)
 {
-	if (strcmp(attr->attr.name, "sim_present"))
+	if (strcmp(attr->attr.name, "sim_present")) {
 		return -1;
+	}
 
 	return sprintf(buf, "%d", bwan_sim_present_status);
 }
@@ -420,8 +385,9 @@ static ssize_t bwan_sim_invert_show(struct kobject *kobj,
 			struct kobj_attribute *attr,
 			char *buf)
 {
-	if (strcmp(attr->attr.name, "sim_invert"))
+	if (strcmp(attr->attr.name, "sim_invert")) {
 		return -1;
+	}
 
 	return sprintf(buf, "%d", bwan_sim_present_invert);
 }
@@ -434,15 +400,15 @@ static ssize_t bwan_sim_invert_store(struct kobject *kobj,
 	int var;
 	sscanf(buf, "%du", &var);
 
-	if (strcmp(attr->attr.name, "sim_invert"))
+	if (strcmp(attr->attr.name, "sim_invert")) {
 		return -1;
+	}
 
 	switch (var) {
 		case 1:
 		case 0:
 			bwan_sim_present_invert = var;
-			if (bwan_sim_present_invert)
-				bwan_sim_present_status = !bwan_sim_present_status;
+			if(bwan_sim_present_invert) bwan_sim_present_status = !bwan_sim_present_status;
 		default:
 			printk("Invalid input\n");
 	}
@@ -465,9 +431,6 @@ static struct kobj_attribute bwan_fw_rdy_attribute =
 static struct kobj_attribute bwan_sim_present_attribute =
 	__ATTR(sim_present, 0666, bwan_sim_present_show, NULL);
 
-static struct kobj_attribute bwan_usb_reset_attribute =
-	__ATTR(usb_reset, 0666, bwan_usb_reset_show, bwan_usb_reset_store);
-
 static struct kobj_attribute bwan_sim_invert_attribute =
 	__ATTR(sim_invert, 0666, bwan_sim_invert_show, bwan_sim_invert_store);
 
@@ -476,9 +439,6 @@ static struct attribute *attrs[] = {
 	&bwan_usb_en_attribute.attr,
 	&bwan_fw_rdy_attribute.attr,
 	&bwan_sim_present_attribute.attr,
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-	&bwan_usb_reset_attribute.attr,
-#endif
 	&bwan_sim_invert_attribute.attr,
 	NULL,
 };
@@ -491,106 +451,6 @@ static struct attribute_group attr_group = {
 	.name = NULL,
 	.attrs = attrs,
 };
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-int bwan_connect_status = 1;
-
-static void bwan_connect(void)
-{
-	if (!ehci_hcd_pdev)
-		return;
-
-	mutex_lock(&bwan_status_lock);
-	if (bwan_connect_status)
-		goto out;
-
-	of_device_add(ehci_hcd_pdev);
-	bwan_connect_status = 1;
-out:
-	mutex_unlock(&bwan_status_lock);
-}
-
-static void bwan_disconnect(void)
-{
-	if (!ehci_hcd_pdev)
-		return;
-
-	mutex_lock(&bwan_status_lock);
-	if (!bwan_connect_status)
-		goto out;
-
-	of_device_del(ehci_hcd_pdev);
-	bwan_connect_status = 0;
-out:
-	mutex_unlock(&bwan_status_lock);
-}
-
-static void bwan_restart_work(struct work_struct *w)
-{
-	bwan_gpio_wan_usb_en(LOW);
-	/* Allow disconnect to detect and make sure 
-	 * USB is out of LPM
-	*/
-	msleep(500);
-
-	/* Make sure to hold a reference to the kobj */
-	of_dev_get(ehci_hcd_pdev);
-	bwan_disconnect();
-
-	bwan_connect();
-	/* Release the reference after finshing */
-	of_dev_put(ehci_hcd_pdev);
-	/* Allow EHCI to stablize */
-	msleep(100);	
-	bwan_gpio_wan_usb_en(HIGH);
-
-
-}
-	
-long bwan_modem_ioctl(struct file *filp, unsigned int cmd,
-				unsigned long arg)
-{
-	int ret = 0;	
-	
-	if (_IOC_TYPE(cmd) != BWAN_CODE) {
-		pr_err("Invalid BWAN code\n");
-		return -EINVAL;
-	}
-
-	switch(cmd)
-	{
-		case BWAN_EHCI_RESET:
-			pr_debug("Resetting EHCI HCD\n");
-			queue_work(system_nrt_wq, &bwan_work);	
-
-			break;
-		default:
-			pr_err("Not a valid command\n");
-			ret = -EINVAL;
-			break;
-	}
-	
-	return ret;
-}
-
-static int bwan_modem_open(struct inode *inode, struct file *file)
-{
-	return 0;
-}
-
-static const struct file_operations bwan_modem_fops = {
-	.owner		= THIS_MODULE,
-	.open		= bwan_modem_open,
-	.unlocked_ioctl	= bwan_modem_ioctl,
-};
-
-
-static struct miscdevice bwan_modem_misc = {
-	.minor	= MISC_DYNAMIC_MINOR,
-	.name	= "bwan",
-	.fops	= &bwan_modem_fops
-};
-#endif
 
 /*
  * We get here if we receive an interrupt. This could be
@@ -711,35 +571,14 @@ static void bwan_gpio_deinit(void)
 	bwan_free_gpio();
 }
 
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-static bool has_wan_onoff_rework(void)
+static int bwan_probe(struct platform_device *pdev)
 {
-	struct device_node *ap;
-	int len;
-
-	ap = of_find_node_by_path("/idme/board_id");
-	if (ap) {
-		const char *boardid = of_get_property(ap, "value", &len);
-		if (len >= 2)
-			if (boardid[0] == '0' && (boardid[1] == 'c' || boardid[1] == 'd'))
-				return ((boardid[3]-'0') > 1) ? true : false;
-	}
-	return false;
-}
-#endif
-
-static int __devinit bwan_probe(struct platform_device *pdev)
-{
-	int retval, irq;
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-	if ((bwan_power_gpio_invert=has_wan_onoff_rework())) 
-		printk("Detected power GPIO pins rework!\n");
-#endif
+	int retval=0, irq;
 
 	retval = bwan_gpio_init(pdev);
-	if (retval)
+	if (retval) {
 		return retval;
+	}
 
 	/*
 	 * create a "wan" directory in sysfs.
@@ -787,7 +626,7 @@ static int __devinit bwan_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	retval = request_irq(irq,
 			bwan_fw_rdy_handler,
-			(IRQF_TRIGGER_RISING | 
+			(IRQF_TRIGGER_RISING |
 			IRQF_TRIGGER_FALLING),
 			"fw_rdy_irq", NULL);
 	if (retval) {
@@ -813,7 +652,7 @@ static int __devinit bwan_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 1);
 	retval = request_irq(irq,
 			bwan_sim_present_handler,
-			(IRQF_TRIGGER_RISING | 
+			(IRQF_TRIGGER_RISING |
 			IRQF_TRIGGER_FALLING),
 			"sim_present_irq", NULL);
 
@@ -827,57 +666,34 @@ static int __devinit bwan_probe(struct platform_device *pdev)
 	bwan_gpio_wan_on(HIGH);
 
 	/* Make sure the modem is powered down */
-	if (bwan_fw_rdy_status)
+	if (bwan_fw_rdy_status) {
 		bwan_pulse_gpio_wan_shutdown(POWER_OFF_HOLD_TIME);
+	}
 
 	/* Init wakelock */
 	wake_lock_init(&bwan_lock,
 			WAKE_LOCK_SUSPEND,
 			"bwan_wake_lock");
-
-	ehci_hcd_node = of_find_node_by_name(NULL, "qcom,ehci-host");
-	if (ehci_hcd_node) {
-		ehci_hcd_pdev = of_find_device_by_node(ehci_hcd_node);	
-		if (!ehci_hcd_pdev)
-		{
-			pr_err("%s: No HCD reference\n",__func__);
-			retval = -ENODEV;
-			goto error1;
-		}
-	}
-	else
-		pr_info("*****can't find the node\n");
-
-	INIT_WORK(&bwan_work, bwan_restart_work);
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-	pr_info("Register BWAN misc device\n");
-	retval = misc_register(&bwan_modem_misc);	
-	if (retval)
-	{
-		pr_err("%s: Unable to register misc device\n",__func__);
-		goto error1;
-	}
-#endif
-
 	return 0;
 
-error1:
 	wake_lock_destroy(&bwan_lock);
 error:
 	bwan_gpio_deinit();
-	if (bwan_kobj && bwan_kset)
+	if (bwan_kobj && bwan_kset) {
 		kset_unregister(bwan_kset);
+	}
 	kobject_put(bwan_kobj);
+
 	return retval;
 }
 
-static int __devexit bwan_remove(struct platform_device *pdev)
+static int bwan_remove(struct platform_device *pdev)
 {
 	wake_lock_destroy(&bwan_lock);
 	/* Make sure the modem is powered down */
-	if (bwan_fw_rdy_status)
+	if (bwan_fw_rdy_status) {
 		bwan_pulse_gpio_wan_shutdown(POWER_OFF_HOLD_TIME);
+	}
 
 	free_irq(platform_get_irq(pdev, 0), NULL);
 	free_irq(platform_get_irq(pdev, 1), NULL);
@@ -886,13 +702,7 @@ static int __devexit bwan_remove(struct platform_device *pdev)
 	bwan_gpio_deinit();
 	kset_unregister(bwan_kset);
 	kobject_put(bwan_kobj);
-	ehci_hcd_pdev = NULL;
-
-#if defined(CONFIG_ARCH_MSM8974_APOLLO) || defined(CONFIG_ARCH_MSM8974_THOR)
-	return misc_deregister(&bwan_modem_misc);
-#else
 	return 0;
-#endif
 }
 
 static void bwan_shutdown(struct platform_device *pdev)
@@ -914,11 +724,11 @@ static int bwan_resume(struct platform_device *pdev)
 	/* Send an uevent to the user */
 	char *device_resume[] = {"DEVICE RESUME", NULL};
 	kobject_uevent_env(bwan_kobj, KOBJ_CHANGE, device_resume);
-
+	/* enable fw_rdy? */
 	return 0;
 }
 
-static struct of_device_id bwan_of_match[] __devinitdata = {
+static struct of_device_id bwan_of_match[] = {
 	{.compatible = "lab126,bwan", },
 	{ },
 };
@@ -938,6 +748,7 @@ static struct platform_driver bwan_driver = {
 
 static int __init bwan_init(void)
 {
+	bwan_sim_present_invert = is_sim_detection_invert();
 	if (platform_driver_register(&bwan_driver) != 0) {
 		printk("driver_reg::can not register bwan driver\n");
                 return -1;

@@ -71,11 +71,6 @@
 
 extern uint qtaguid_debug_mask;
 
-#ifdef CONFIG_NETFILTER_XT_QTAGUID_PSTATS
-/* Import the wakelock check */
-extern int pm_wakelock_is_active(const char *name);
-#endif
-
 /*---------------------------------------------------------------------------*/
 /*
  * Tags:
@@ -182,29 +177,22 @@ struct byte_packet_counters {
 
 struct data_counters {
 	struct byte_packet_counters bpc[IFS_MAX_COUNTER_SETS][IFS_MAX_DIRECTIONS][IFS_MAX_PROTOS];
-	struct byte_packet_counters pbpc[IFS_MAX_COUNTER_SETS][IFS_MAX_DIRECTIONS][IFS_MAX_PROTOS];
 };
 
 static inline uint64_t dc_sum_bytes(struct data_counters *counters,
-				    int set, int pstats,
+				    int set,
 				    enum ifs_tx_rx direction)
 {
-	return pstats ? counters->pbpc[set][direction][IFS_TCP].bytes
-		+ counters->pbpc[set][direction][IFS_UDP].bytes
-		+ counters->pbpc[set][direction][IFS_PROTO_OTHER].bytes :
-		counters->bpc[set][direction][IFS_TCP].bytes
+	return counters->bpc[set][direction][IFS_TCP].bytes
 		+ counters->bpc[set][direction][IFS_UDP].bytes
 		+ counters->bpc[set][direction][IFS_PROTO_OTHER].bytes;
 }
 
 static inline uint64_t dc_sum_packets(struct data_counters *counters,
-				      int set, int pstats,
+				      int set,
 				      enum ifs_tx_rx direction)
 {
-	return pstats ? counters->pbpc[set][direction][IFS_TCP].packets
-		+ counters->pbpc[set][direction][IFS_UDP].packets
-		+ counters->pbpc[set][direction][IFS_PROTO_OTHER].packets :
-		 counters->bpc[set][direction][IFS_TCP].packets
+	return counters->bpc[set][direction][IFS_TCP].packets
 		+ counters->bpc[set][direction][IFS_UDP].packets
 		+ counters->bpc[set][direction][IFS_PROTO_OTHER].packets;
 }

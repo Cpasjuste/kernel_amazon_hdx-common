@@ -17,12 +17,12 @@
 #include <trace/events/power.h>
 #include <linux/syscore_ops.h>
 #include <linux/interrupt.h>
+#include <linux/of.h>
 #include <linux/irq.h>
 #include <linux/sched.h>
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 #include <linux/metricslog.h>
 #endif
-
 #include "power.h"
 
 #ifdef CONFIG_AMAZON_METRICS_LOG
@@ -73,6 +73,17 @@ static DECLARE_WAIT_QUEUE_HEAD(wakeup_count_wait_queue);
 static struct wakeup_event *wakeup_events;
 static struct wakeup_event *last_wakeup_ev;
 static unsigned total_wakeup_events = WEV_MAX;
+#define MAX_WAKEUP_EVT_LEN  100
+struct wakeup_desc_evt {
+	wakeup_event_t wev;
+	char name[MAX_WAKEUP_EVT_LEN];
+};
+
+static struct wakeup_desc_evt wev_desc_table[WEV_MAX];
+static int evt_cnt;
+
+#define WAKE_ON_WIFI_TIMEOUT (1000)
+static struct wakeup_source *wifi_ws;
 
 /**
  * wakeup_source_prepare - Prepare a new wakeup source for initialization.
@@ -148,6 +159,8 @@ EXPORT_SYMBOL_GPL(wakeup_source_destroy);
  */
 void wakeup_source_add(struct wakeup_source *ws)
 {
+	unsigned long flags;
+
 	if (WARN_ON(!ws))
 		return;
 
@@ -156,9 +169,9 @@ void wakeup_source_add(struct wakeup_source *ws)
 	ws->active = false;
 	ws->last_time = ktime_get();
 
-	spin_lock_irq(&events_lock);
+	spin_lock_irqsave(&events_lock, flags);
 	list_add_rcu(&ws->entry, &wakeup_sources);
-	spin_unlock_irq(&events_lock);
+	spin_unlock_irqrestore(&events_lock, flags);
 }
 EXPORT_SYMBOL_GPL(wakeup_source_add);
 
@@ -168,12 +181,14 @@ EXPORT_SYMBOL_GPL(wakeup_source_add);
  */
 void wakeup_source_remove(struct wakeup_source *ws)
 {
+	unsigned long flags;
+
 	if (WARN_ON(!ws))
 		return;
 
-	spin_lock_irq(&events_lock);
+	spin_lock_irqsave(&events_lock, flags);
 	list_del_rcu(&ws->entry);
-	spin_unlock_irq(&events_lock);
+	spin_unlock_irqrestore(&events_lock, flags);
 	synchronize_rcu();
 }
 EXPORT_SYMBOL_GPL(wakeup_source_remove);
@@ -398,6 +413,12 @@ EXPORT_SYMBOL_GPL(device_set_wakeup_enable);
 static void wakeup_source_activate(struct wakeup_source *ws)
 {
 	unsigned int cec;
+
+	/*
+	 * active wakeup source should bring the system
+	 * out of PM_SUSPEND_FREEZE state
+	 */
+	freeze_wake();
 
 	ws->active = true;
 	ws->active_count++;
@@ -670,6 +691,31 @@ void pm_wakeup_event(struct device *dev, unsigned int msec)
 }
 EXPORT_SYMBOL_GPL(pm_wakeup_event);
 
+static void print_active_wakeup_sources(void)
+{
+	struct wakeup_source *ws;
+	int active = 0;
+	struct wakeup_source *last_activity_ws = NULL;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		if (ws->active) {
+			pr_info("active wakeup source: %s\n", ws->name);
+			active = 1;
+		} else if (!active &&
+			   (!last_activity_ws ||
+			    ktime_to_ns(ws->last_time) >
+			    ktime_to_ns(last_activity_ws->last_time))) {
+			last_activity_ws = ws;
+		}
+	}
+
+	if (!active && last_activity_ws)
+		pr_info("last active wakeup source: %s\n",
+			last_activity_ws->name);
+	rcu_read_unlock();
+}
+
 /**
  * pm_wakeup_pending - Check if power transition in progress should be aborted.
  *
@@ -692,6 +738,10 @@ bool pm_wakeup_pending(void)
 		events_check_enabled = !ret;
 	}
 	spin_unlock_irqrestore(&events_lock, flags);
+
+	if (ret)
+		print_active_wakeup_sources();
+
 	return ret;
 }
 
@@ -744,24 +794,113 @@ bool pm_get_wakeup_count(unsigned int *count, bool block)
 bool pm_save_wakeup_count(unsigned int count)
 {
 	unsigned int cnt, inpr;
+	unsigned long flags;
 
 	events_check_enabled = false;
-	spin_lock_irq(&events_lock);
+	spin_lock_irqsave(&events_lock, flags);
 	split_counters(&cnt, &inpr);
 	if (cnt == count && inpr == 0) {
 		saved_count = count;
 		events_check_enabled = true;
 	}
-	spin_unlock_irq(&events_lock);
+	spin_unlock_irqrestore(&events_lock, flags);
 	return events_check_enabled;
 }
 
-/**
- * weak function for BSPs to map irq to wakeup_event_t
- */
-__weak wakeup_event_t irq_to_wakeup_ev(int irq)
+static const unsigned char event_names[][MAX_WAKEUP_EVT_LEN] = {
+	"rtc",
+	"wifi",
+	"wan",
+	"usbplug",
+	"ponkey",
+	"hallsens",
+	"bt",
+	"charger",
+	"unknown (grp)",
+};
+
+int __init dt_gpio_wake_ev_setup(void)
 {
-	return WEV_MAX;
+	struct device_node *root_node, *soc_node, *wakeup_node;
+	unsigned int i, max_evt;
+	int ret = 0;
+
+	root_node = of_find_node_by_name(NULL, "/");
+	if (!root_node)
+		pr_warn("%s: invalid dt root?\n", __func__);
+
+	soc_node = of_find_node_by_name(root_node, "soc");
+	if (!soc_node) {
+		of_node_put(root_node);
+		goto dt_err;
+	}
+
+	wakeup_node = of_find_node_by_name(soc_node,
+			"lab126,wakeup_irq_desc");
+	if (!wakeup_node) {
+		pr_err("%s:%u: wakeup node not found\n",
+			 __func__, __LINE__);
+		of_node_put(soc_node);
+		if (root_node)
+			of_node_put(root_node);
+		goto dt_err;
+	}
+
+	/* irq desc to evt mapping */
+	max_evt = ARRAY_SIZE(event_names);
+	for (i = 0; i < max_evt; i++) {
+		char *s = NULL;
+		ret = of_property_read_string(wakeup_node, event_names[i],
+				 (const char **)&s);
+		if (s) {
+			strlcpy(wev_desc_table[i].name, s, strlen(s) + 1);
+			evt_cnt++;
+			wev_desc_table[i].wev = i;
+			if (ret) {
+				wev_desc_table[i].name[0] = 0;
+				evt_cnt--;
+			}
+		}
+	}
+
+	of_node_put(wakeup_node);
+	of_node_put(soc_node);
+	if (root_node)
+		of_node_put(root_node);
+
+	return 0;
+
+dt_err:
+	pr_warn("%s: invalid dt\n", __func__);
+	return -EINVAL;
+}
+EXPORT_SYMBOL(dt_gpio_wake_ev_setup);
+
+wakeup_event_t lookup_irq_desc_name(const char *name)
+{
+	int i, len;
+
+	for (i = 0; i < evt_cnt; i++) {
+		len = strlen(wev_desc_table[i].name);
+		if (len && strnstr(name, wev_desc_table[i].name, len))
+			return wev_desc_table[i].wev;
+	}
+	return WEV_NONE;
+}
+
+wakeup_event_t irq_to_wakeup_ev(int irq)
+{
+	wakeup_event_t evt = WEV_NONE;
+	struct irq_desc *desc;
+
+	desc = irq_to_desc(irq);
+	if (desc->action && desc->action->name)
+		/*
+		 * look up the desc action name in the device
+		 * tree mapping function
+		 */
+		evt = lookup_irq_desc_name(desc->action->name);
+	return evt;
 }
 
 /**
@@ -836,6 +975,7 @@ void pm_report_resume_ev(wakeup_event_t ev, int irq)
 		we->count++;
 
 	last_wakeup_ev = we;
+
 }
 EXPORT_SYMBOL(pm_report_resume_ev);
 
@@ -870,7 +1010,7 @@ EXPORT_SYMBOL(pm_report_resume_irq);
 
 wakeup_event_t pm_get_resume_ev(ktime_t *ts)
 {
-	if (unlikely(!wakeup_events))
+	if (unlikely(!wakeup_events || !ts))
 		return WEV_NONE;
 
 	if (!last_wakeup_ev)
@@ -1079,9 +1219,39 @@ static int wakeup_event_suspend(void)
 	return 0;
 }
 
+static void wakeup_event_resume(void)
+{
+	/* Best Effort Wake-on-Wireless packet delivery to application in a
+	 * single resume cycle.
+	 *
+	 * When the device gets woken up from suspend due to a packet delivery,
+	 * there is still a chance that it may go back into suspend before the
+	 * application got scheduled to receive this packet on it's socket.
+	 *
+	 * We cannot *guarantee* the delivery in a single resume cycle (the nw
+	 * stack doesn't), so we are depending on the WiFi driver's rx wakelock
+	 * to keep us out of suspend every time.
+	 *
+	 * Instead of relying on the WiFi driver, here we add a generic wakelock
+	 * with 1s timeout to make sure we stay up atleast for a second before
+	 * we go back into suspend, but *only* if the wakeup was due to a packet
+	 * delivery.
+	 *
+	 * Needless to say, this still doesn't guarantee the packet delivery to
+	 * the application, but this is the best we can do with a very
+	 * slight/limited standby power impact.
+	 *
+	 * FIXME: ssp
+	 */
+
+	if (last_wakeup_ev && WEV_WIFI == last_wakeup_ev->event)
+		__pm_wakeup_event(wifi_ws, WAKE_ON_WIFI_TIMEOUT);
+}
+
 
 static struct syscore_ops we_syscore_ops = {
 	.suspend = wakeup_event_suspend,
+	.resume = wakeup_event_resume,
 };
 
 static int __init wakeup_events_init(void)
@@ -1091,8 +1261,7 @@ static int __init wakeup_events_init(void)
 	wakeup_events = kzalloc(WEV_TOTAL * sizeof(*wakeup_events),
 					GFP_KERNEL);
 	if (!wakeup_events) {
-		printk(KERN_WARNING"%s: failed to allocated wakeup events\n",
-				__func__);
+		pr_warn("%s: failed to allocated wakeup events\n", __func__);
 		return -ENOMEM;
 	}
 
@@ -1100,15 +1269,17 @@ static int __init wakeup_events_init(void)
 	wakeup_events[WEV_RTC].name = "Rtc";
 	wakeup_events[WEV_WIFI].name = "WiFi";
 	wakeup_events[WEV_WAN].name = "Wan";
+	wakeup_events[WEV_USB].name = "USB plug";
 	wakeup_events[WEV_PWR].name = "Pon Key";
 	wakeup_events[WEV_HALL].name = "Hall Sens";
 	wakeup_events[WEV_BT].name = "BT";
 	wakeup_events[WEV_CHARGER].name = "Charger";
+	wakeup_events[WEV_TOTAL - 1].name = "Unknown (grp)";
 
 	for (i = WEV_RTC; i < WEV_MAX; i++)
 		wakeup_events[i].event = i;
 
-	register_syscore_ops(&we_syscore_ops);
+	wifi_ws = wakeup_source_register("wake-on-wifi");
 
 	return 0;
 }
@@ -1130,4 +1301,16 @@ out:
 	return 0;
 }
 
+/* This is purposely done in late_initcall to ensure wakeup_event_resume gets
+ * called *after* timekeeping has resumed and we can safely kick a wakeup
+ * event without going into slowpath with irqs disabled
+ */
+static int __init wakeup_sources_syscore_init(void)
+{
+	register_syscore_ops(&we_syscore_ops);
+
+	return 0;
+}
+
 postcore_initcall(wakeup_sources_debugfs_init);
+late_initcall(wakeup_sources_syscore_init);

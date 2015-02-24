@@ -65,13 +65,6 @@ int of_device_add(struct platform_device *ofdev)
 
 	return device_add(&ofdev->dev);
 }
-EXPORT_SYMBOL(of_device_add);
-
-void of_device_del(struct platform_device *ofdev)
-{
-	device_del(&ofdev->dev);
-}
-EXPORT_SYMBOL(of_device_del);
 
 int of_device_register(struct platform_device *pdev)
 {
@@ -172,10 +165,6 @@ void of_device_uevent(struct device *dev, struct kobj_uevent_env *env)
 			seen++;
 		}
 	}
-
-	if (seen)
-		add_uevent_var(env, "OF_ALIAS_N=%d", seen);
-
 	mutex_unlock(&of_aliases_mutex);
 }
 

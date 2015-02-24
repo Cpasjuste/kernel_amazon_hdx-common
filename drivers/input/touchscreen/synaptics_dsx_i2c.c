@@ -407,8 +407,10 @@ static ssize_t synaptics_rmi4_0dbutton_store(struct device *dev,
 					rmi4_data->f01_ctrl_base_addr + 1 + ii,
 					&intr_enable,
 					sizeof(intr_enable));
-			if (retval < 0)
+			if (retval < 0) {
+				mutex_unlock(&rmi->support_fn_list_mutex);
 				return retval;
+			}
 
 			if (input == 1)
 				intr_enable |= fhandler->intr_mask;
@@ -419,8 +421,10 @@ static ssize_t synaptics_rmi4_0dbutton_store(struct device *dev,
 					rmi4_data->f01_ctrl_base_addr + 1 + ii,
 					&intr_enable,
 					sizeof(intr_enable));
-			if (retval < 0)
+			if (retval < 0) {
+				mutex_unlock(&rmi->support_fn_list_mutex);
 				return retval;
+			}
 		}
 	}
 	mutex_unlock(&rmi->support_fn_list_mutex);
@@ -695,9 +699,9 @@ static int synaptics_rmi4_f11_abs_report(struct synaptics_rmi4_data *rmi4_data,
 			input_report_abs(rmi4_data->input_dev,
 					ABS_MT_POSITION_X, x);
 			input_report_abs(rmi4_data->input_dev,
-					ABS_MT_POSITION_Y, y);	
-			/* pressure is must have, hard code value for now */			
-			input_report_abs(rmi4_data->input_dev, 
+					ABS_MT_POSITION_Y, y);
+			/* pressure is must have, hard code value for now */
+			input_report_abs(rmi4_data->input_dev,
 					ABS_MT_PRESSURE, z);
 
 #ifdef REPORT_2D_W
@@ -1889,7 +1893,7 @@ static int synaptics_rmi4_parse_dt(struct device *dev, struct synaptics_dsx_plat
  * and creates a work queue for detection of other expansion Function
  * modules.
  */
-static int __devinit synaptics_rmi4_probe(struct i2c_client *client,
+static int synaptics_rmi4_probe(struct i2c_client *client,
 		const struct i2c_device_id *dev_id)
 {
 	int retval;
@@ -1960,6 +1964,7 @@ static int __devinit synaptics_rmi4_probe(struct i2c_client *client,
 			goto err_regulator;
 		}
 
+#if defined(CONFIG_SND_SOC_MSM8974_THOR) || defined(CONFIG_SND_SOC_MSM8974_APOLLO)
 		if (regulator_count_voltages(rmi4_data->regulator) > 0) {
 			retval = regulator_set_voltage(rmi4_data->regulator, 3000000, 3000000);
 			if (retval) {
@@ -1969,18 +1974,32 @@ static int __devinit synaptics_rmi4_probe(struct i2c_client *client,
 				goto err_configure_regulator;
 			}
 		}
+#endif
+		retval = regulator_enable(rmi4_data->regulator);
 
-		regulator_enable(rmi4_data->regulator);
+                if (retval) {
+			dev_err(&client->dev,
+				"%s: regulator_enable failed on digital_regulator, %d\n",
+					__func__, retval);
+			goto err_configure_regulator;
+		}
 
 		rmi4_data->digital_regulator = regulator_get(&client->dev, "vcc_i2c");
 		if (IS_ERR(rmi4_data->digital_regulator)) {
 			dev_err(&client->dev,
-					"%s: Failed to get regulator vcc_i2c, %d\n",
-					__func__, retval);
+				"%s: Failed to get regulator vcc_i2c, %d\n",
+				__func__, retval);
 			retval = PTR_ERR(rmi4_data->digital_regulator);
 			goto err_digital_regulator;
 		}
-		regulator_enable(rmi4_data->digital_regulator);
+		retval = regulator_enable(rmi4_data->digital_regulator);
+		if (retval) {
+			dev_err(&client->dev,
+				"%s: regulator_enable failed on digital_regulator, %d\n",
+				__func__, retval);
+			goto err_configure_regulator;
+		}
+
 	}
 
 	if (platform_data->use_id_gpio) {
@@ -2358,7 +2377,7 @@ static int __synaptics_rmi4_remove(struct i2c_client *client)
 
 	return 0;
 }
-static int __devexit synaptics_rmi4_remove(struct i2c_client *client)
+static int synaptics_rmi4_remove(struct i2c_client *client)
 {
 	return __synaptics_rmi4_remove(client);
 }
@@ -2559,6 +2578,7 @@ static int __synaptics_rmi4_resume(void *dev_context)
 	dev_info(&rmi4_data->i2c_client->dev,
 			"%s: sensor_sleep=%d\n",
 			__func__, rmi4_data->sensor_sleep);
+
 	if (rmi4_data->sensor_sleep) {
 		synaptics_rmi4_sensor_wake(rmi4_data);
 		rmi4_data->touch_stopped = false;
@@ -2615,7 +2635,7 @@ static struct i2c_driver synaptics_rmi4_driver = {
 		*/
 	},
 	.probe = synaptics_rmi4_probe,
-	.remove = __devexit_p(synaptics_rmi4_remove),
+	.remove = synaptics_rmi4_remove,
 	.shutdown = synaptics_rmi4_shutdown,
 	.id_table = synaptics_rmi4_id_table,
 };

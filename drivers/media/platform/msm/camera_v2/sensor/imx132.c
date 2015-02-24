@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,7 +10,6 @@
  * GNU General Public License for more details.
  *
  */
-
 #include "msm_sensor.h"
 #define IMX132_SENSOR_NAME "imx132"
 DEFINE_MSM_MUTEX(imx132_mut);
@@ -51,7 +50,11 @@ static struct msm_sensor_power_setting imx132_power_setting[] = {
 	{
 		.seq_type = SENSOR_CLK,
 		.seq_val = SENSOR_CAM_MCLK,
+#if defined(CONFIG_MACH_URSA)
 		.config_val = 24000000,
+#else
+		.config_val = 0,
+#endif
 		.delay = 1,
 	},
 	{
@@ -81,7 +84,6 @@ static int32_t msm_imx132_i2c_probe(struct i2c_client *client,
 {
 	return msm_sensor_i2c_probe(client, id, &imx132_s_ctrl);
 }
-
 static struct i2c_driver imx132_i2c_driver = {
 	.id_table = imx132_i2c_id,
 	.probe  = msm_imx132_i2c_probe,
@@ -114,7 +116,12 @@ static int32_t imx132_platform_probe(struct platform_device *pdev)
 	int32_t rc = 0;
 	const struct of_device_id *match;
 	match = of_match_device(imx132_dt_match, &pdev->dev);
-	rc = msm_sensor_platform_probe(pdev, match->data);
+	if (match)
+		rc = msm_sensor_platform_probe(pdev, match->data);
+	else {
+		pr_err("%s:%d match is null\n", __func__, __LINE__);
+		rc = -EINVAL;
+	}
 	return rc;
 }
 
