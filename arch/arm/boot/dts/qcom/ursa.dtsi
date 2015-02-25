@@ -10,8 +10,8 @@
  * GNU General Public License for more details.
  */
 
-#include "dsi-panel-ursa-720p-cmd.dtsi"
-#include "ursa-camera-sensor.dtsi"
+/include/ "dsi-panel-ursa-720p-cmd.dtsi"
+/include/ "ursa-camera-sensor.dtsi"
 
 / {
 	aliases {

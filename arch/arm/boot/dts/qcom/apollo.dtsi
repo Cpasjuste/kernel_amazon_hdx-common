@@ -10,10 +10,10 @@
  * GNU General Public License for more details.
  */
 
-#include "msm8974-leds.dtsi"
-#include "thor-apollo-backlight.dtsi"
-#include "thor-apollo-audio.dtsi"
-#include "apollo-camera-sensor.dtsi"
+/include/ "msm8974-leds.dtsi"
+/include/ "thor-apollo-backlight.dtsi"
+/include/ "thor-apollo-audio.dtsi"
+/include/ "apollo-camera-sensor.dtsi"
 
 &soc {
         qcom,hdmi_tx@fd922100 {
@@ -726,8 +726,8 @@
 	qcom,pad-drv-on = <0x7 0x4 0x4>; /* 16mA, 10mA, 10mA */
 };
 
-#include "dsi-panel-jdi-dualmipi0-wqxga-video.dtsi"
-#include "dsi-panel-jdi-dualmipi1-wqxga-video.dtsi"
+/include/ "dsi-panel-jdi-dualmipi0-wqxga-video.dtsi"
+/include/ "dsi-panel-jdi-dualmipi1-wqxga-video.dtsi"
 
 &fb_mem {
 	reg = <0 0x2000000>;  /* size 32MB */

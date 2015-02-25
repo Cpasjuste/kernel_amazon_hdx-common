@@ -12,9 +12,9 @@
 
 /dts-v1/;
 
-#include "msm8974.dtsi"
-#include "apq8074-v2.0-1.dtsi"
-#include "apollo.dtsi"
+/include/ "msm8974.dtsi"
+/include/ "apq8074-v2.0-1.dtsi"
+/include/ "apollo.dtsi"
 
 / {
 	model = "Amazon Apollo v2";

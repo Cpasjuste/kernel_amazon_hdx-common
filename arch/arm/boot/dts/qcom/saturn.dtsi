@@ -240,10 +240,10 @@
         };
 };
 
-#include "dsi-panel-jdi-dualmipi0-wqxga-video.dtsi"
-#include "dsi-panel-jdi-dualmipi1-wqxga-video.dtsi"
-#include "dsi-panel-jdi-dualmipi0-wqxga-cmd.dtsi"
-#include "dsi-panel-jdi-dualmipi1-wqxga-cmd.dtsi"
+/include/ "dsi-panel-jdi-dualmipi0-wqxga-video.dtsi"
+/include/ "dsi-panel-jdi-dualmipi1-wqxga-video.dtsi"
+/include/ "dsi-panel-jdi-dualmipi0-wqxga-cmd.dtsi"
+/include/ "dsi-panel-jdi-dualmipi1-wqxga-cmd.dtsi"
 
 &dsi_dual0_jdi_wqxga_video {
 	qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_wled";

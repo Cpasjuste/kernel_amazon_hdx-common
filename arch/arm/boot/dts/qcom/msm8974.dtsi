@@ -10,8 +10,7 @@
  * GNU General Public License for more details.
  */
 
-#include "skeleton.dtsi"
-#include <dt-bindings/clock/msm-clocks-8974.h>
+/include/ "skeleton.dtsi"
 
 / {
 	model = "Qualcomm MSM 8974";
@@ -99,16 +98,16 @@
 	soc: soc { };
 };
 
-#include "msm8974-camera.dtsi"
-#include "msm8974-coresight.dtsi"
-#include "msm-gdsc.dtsi"
-#include "msm8974-ion.dtsi"
-#include "msm8974-gpu.dtsi"
-#include "msm8974-mdss.dtsi"
-#include "msm8974-smp2p.dtsi"
-#include "msm8974-bus.dtsi"
-#include "msm8974-ipcrouter.dtsi"
-#include "msm-rdbg.dtsi"
+/include/ "msm8974-camera.dtsi"
+/include/ "msm8974-coresight.dtsi"
+/include/ "msm-gdsc.dtsi"
+/include/ "msm8974-ion.dtsi"
+/include/ "msm8974-gpu.dtsi"
+/include/ "msm8974-mdss.dtsi"
+/include/ "msm8974-smp2p.dtsi"
+/include/ "msm8974-bus.dtsi"
+/include/ "msm8974-ipcrouter.dtsi"
+/include/ "msm-rdbg.dtsi"
 
 &soc {
 	#address-cells = <1>;
@@ -2790,39 +2789,39 @@
 
 &gdsc_venus {
 	clock-names = "core_clk";
-	clocks = <&clock_mmss clk_venus0_vcodec0_clk>;
+	clocks = <&clock_mmss 0xaf0dbde4>;
 	status = "ok";
 };
 
 &gdsc_mdss {
 	clock-names = "core_clk", "lut_clk";
-	clocks = <&clock_mmss clk_mdss_mdp_clk>,
-	         <&clock_mmss clk_mdss_mdp_lut_clk>;
+	clocks = <&clock_mmss 0x618336ac>,
+	         <&clock_mmss 0x81a28e41>;
 	status = "ok";
 };
 
 &gdsc_jpeg {
 	clock-names = "core0_clk", "core1_clk", "core2_clk";
-	clocks = <&clock_mmss clk_camss_jpeg_jpeg0_clk>,
-	         <&clock_mmss clk_camss_jpeg_jpeg1_clk>,
-		 <&clock_mmss clk_camss_jpeg_jpeg2_clk>;
+	clocks = <&clock_mmss 0xa1f09a89>,
+	         <&clock_mmss 0x32952078>,
+		 <&clock_mmss 0xd3a2ff99>;
 	status = "ok";
 };
 
 &gdsc_vfe {
 	clock-names = "core0_clk", "core1_clk", "csi0_clk", "csi1_clk",
 		      "cpp_clk";
-	clocks = <&clock_mmss clk_camss_vfe_vfe0_clk>,
-	         <&clock_mmss clk_camss_vfe_vfe1_clk>,
-	         <&clock_mmss clk_camss_csi_vfe0_clk>,
-	         <&clock_mmss clk_camss_csi_vfe1_clk>,
-	         <&clock_mmss clk_camss_vfe_cpp_clk>;
+	clocks = <&clock_mmss 0x373027a2>,
+	         <&clock_mmss 0xb8d03898>,
+	         <&clock_mmss 0x3023937a>,
+	         <&clock_mmss 0xe66fa522>,
+	         <&clock_mmss 0x3ca47975>;
 	status = "ok";
 };
 
 &gdsc_oxili_gx {
 	clock-names = "core_clk";
-	clocks = <&clock_mmss clk_oxili_gfx3d_clk>;
+	clocks = <&clock_mmss 0x40c75e70>;
 	status = "ok";
 };
 

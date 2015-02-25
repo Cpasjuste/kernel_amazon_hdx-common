@@ -10,8 +10,8 @@
  * GNU General Public License for more details.
  */
 
-#include "skeleton64.dtsi"
-#include <dt-bindings/clock/msm-clocks-plutonium.h>
+/include/ "skeleton64.dtsi"
+/include/ <dt-bindings/clock/msm-clocks-plutonium.h>
 
 / {
 	model = "Qualcomm MSM plutonium";
@@ -99,7 +99,7 @@
 	};
 };
 
-#include "msm-gdsc.dtsi"
+/include/ "msm-gdsc.dtsi"
 
 &soc {
 	#address-cells = <1>;

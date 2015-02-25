@@ -12,9 +12,9 @@
 
 /dts-v1/;
 
-#include "msm8974.dtsi"
-#include "apq8074-v2.0-1.dtsi"
-#include "thor.dtsi"
+/include/ "msm8974.dtsi"
+/include/ "apq8074-v2.0-1.dtsi"
+/include/ "thor.dtsi"
 
 / {
 	model = "Amazon Thor v2";

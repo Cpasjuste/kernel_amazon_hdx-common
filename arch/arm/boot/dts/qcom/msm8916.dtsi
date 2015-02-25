@@ -10,8 +10,8 @@
  * GNU General Public License for more details.
  */
 
-#include "skeleton64.dtsi"
-#include <dt-bindings/clock/msm-clocks-8916.h>
+/include/ "skeleton64.dtsi"
+/include/ <dt-bindings/clock/msm-clocks-8916.h>
 
 / {
 	model = "Qualcomm MSM8916";
@@ -101,13 +101,13 @@
 	soc: soc { };
 };
 
-#include "msm8916-ion.dtsi"
-#include "msm8916-coresight.dtsi"
-#include "msm8916-smp2p.dtsi"
-#include "msm8916-ipcrouter.dtsi"
-#include "msm-gdsc-8916.dtsi"
-#include "msm8916-iommu.dtsi"
-#include "msm8916-gpu.dtsi"
+/include/ "msm8916-ion.dtsi"
+/include/ "msm8916-coresight.dtsi"
+/include/ "msm8916-smp2p.dtsi"
+/include/ "msm8916-ipcrouter.dtsi"
+/include/ "msm-gdsc-8916.dtsi"
+/include/ "msm8916-iommu.dtsi"
+/include/ "msm8916-gpu.dtsi"
 
 &soc {
 	#address-cells = <1>;
@@ -1124,9 +1124,9 @@
 	status = "okay";
 };
 
-#include "msm-pm8916.dtsi"
-#include "msm8916-regulator.dtsi"
-#include "msm8916-pm.dtsi"
+/include/ "msm-pm8916.dtsi"
+/include/ "msm8916-regulator.dtsi"
+/include/ "msm8916-pm.dtsi"
 
 &pm8916_vadc {
 	chan@5 {

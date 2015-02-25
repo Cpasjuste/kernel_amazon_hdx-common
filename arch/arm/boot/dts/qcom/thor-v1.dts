@@ -12,10 +12,10 @@
 
 /dts-v1/;
 
-#include "msm8974.dtsi"
-#include "apq8074-v1.dtsi"
-#include "thor.dtsi"
-#include "thor-apollo-emmc-sdcc-disable-hs200.dtsi"
+/include/ "msm8974.dtsi"
+/include/ "apq8074-v1.dtsi"
+/include/ "thor.dtsi"
+/include/ "thor-apollo-emmc-sdcc-disable-hs200.dtsi"
 
 / {
 	model = "Amazon Thor v1";

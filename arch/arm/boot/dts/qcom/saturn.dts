@@ -12,11 +12,11 @@
 
 /dts-v1/;
 
-#include "apq8084-v1.1.dtsi"
-#include "saturn.dtsi"
-#include "apq8084-old-pwr-grid.dtsi"
-#include "saturn-camera-sensor.dtsi"
-#include "saturn-camera-proto.dtsi"
+/include/ "apq8084-v1.1.dtsi"
+/include/ "saturn.dtsi"
+/include/ "apq8084-old-pwr-grid.dtsi"
+/include/ "saturn-camera-sensor.dtsi"
+/include/ "saturn-camera-proto.dtsi"
 
 / {
 	model = "Amazon Saturn Proto";

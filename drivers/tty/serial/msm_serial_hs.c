@@ -62,6 +62,8 @@
 #include <asm/atomic.h>
 #include <asm/irq.h>
 
+#include <linux/pinctrl/consumer.h>
+
 #include <linux/msm-sps.h>
 #include <linux/platform_data/msm_serial_hs.h>
 #include <linux/msm-bus.h>

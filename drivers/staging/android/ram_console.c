@@ -24,6 +24,7 @@
 #include <linux/proc_fs.h>
 #include <linux/pstore_ram.h>
 #include <linux/compiler.h>
+#include <linux/seq_file.h>
 #include "ram_console.h"
 
 static int last_kmsg_proc_show(struct seq_file *m, void *v)

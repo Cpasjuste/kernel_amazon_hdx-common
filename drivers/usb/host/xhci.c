@@ -400,9 +400,9 @@ static inline void xhci_cleanup_msix(struct xhci_hcd *xhci)
 {
 }
 
-static inline void xhci_msix_sync_irqs(struct xhci_hcd *xhci)
-{
-}
+//static inline void xhci_msix_sync_irqs(struct xhci_hcd *xhci)
+//{
+//}
 
 #endif
 
