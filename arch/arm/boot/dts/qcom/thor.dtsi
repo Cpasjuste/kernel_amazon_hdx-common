@@ -717,9 +717,9 @@
 
 /include/ "dsi-panel-novatek-1080p-video.dtsi"
 
-//&fb_mem {
-//	reg = <0 0x2000000>;  /* size 32MB */
-//};
+&fb_mem {
+	reg = <0 0x2000000>;  /* size 32MB */
+};
 
 &dsi_novatek_1080p_video {
 	qcom,cont-splash-enabled;

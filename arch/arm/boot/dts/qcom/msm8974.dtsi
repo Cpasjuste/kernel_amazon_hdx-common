@@ -93,6 +93,13 @@
 			reg = <0 0x614000>;
 			lable = "audio_mem";
 		};
+
+		fb_mem: fb_region@0 {
+			linux,contiguous-region;
+			reg = <0 0 0 0x1d00000>;
+			label = "fb_mem";
+			linux,memory-limit = <0xffffffff>;
+		};
 	};
 
 	soc: soc { };
