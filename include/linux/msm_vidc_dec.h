@@ -553,6 +553,7 @@ struct vdec_output_frameinfo {
 	enum vdec_interlaced_format interlaced_format;
 	struct vdec_aspectratioinfo aspect_ratio_info;
 	struct vdec_sep_metadatainfo metadata_info;
+	struct vdec_picsize picsize;
 };
 
 union vdec_msgdata {
