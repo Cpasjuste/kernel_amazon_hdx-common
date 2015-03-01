@@ -58,8 +58,6 @@
 #define VDEC_MSG_EVT_HW_ERROR	(VDEC_MSG_BASE + 14)
 #define VDEC_MSG_EVT_INFO_CONFIG_CHANGED	(VDEC_MSG_BASE + 15)
 #define VDEC_MSG_EVT_INFO_FIELD_DROPPED	(VDEC_MSG_BASE + 16)
-#define VDEC_MSG_EVT_HW_OVERLOAD	(VDEC_MSG_BASE + 17)
-#define VDEC_MSG_EVT_MAX_CLIENTS	(VDEC_MSG_BASE + 18)
 
 /*Buffer flags bits masks.*/
 #define VDEC_BUFFERFLAG_EOS	0x00000001
@@ -286,6 +284,7 @@ enum vdec_codec {
 	VDEC_CODECTYPE_VC1 = 0xb,
 	VDEC_CODECTYPE_VC1_RCV = 0xc,
 	VDEC_CODECTYPE_HEVC = 0xd,
+	VDEC_CODECTYPE_MVC = 0xe,
 };
 
 enum vdec_mpeg2_profile {
@@ -555,7 +554,6 @@ struct vdec_output_frameinfo {
 	enum vdec_interlaced_format interlaced_format;
 	struct vdec_aspectratioinfo aspect_ratio_info;
 	struct vdec_sep_metadatainfo metadata_info;
-	struct vdec_picsize picsize;
 };
 
 union vdec_msgdata {

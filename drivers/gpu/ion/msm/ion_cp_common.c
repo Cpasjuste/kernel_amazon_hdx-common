@@ -316,19 +316,3 @@ int ion_cp_unsecure_buffer(struct ion_buffer *buffer, int force_unsecure)
 	mutex_unlock(&buf->lock);
 	return ret_value;
 }
-
-#define FEATURE_ID_CP 12
-
-#define MAKE_CP_VERSION(major, minor, patch) \
-	(((major & 0x3FF) << 22) | ((minor & 0x3FF) << 12) | (patch & 0xFFF))
-
-bool msm_secure_v2_is_supported(void)
-{
-	int version = scm_get_feat_version(FEATURE_ID_CP);
-
-	/*
-	 * if the version is < 1.1.0 then dynamic buffer allocation is
-	 * not supported
-	 */
-	return version >= MAKE_CP_VERSION(1, 1, 0);
-}
