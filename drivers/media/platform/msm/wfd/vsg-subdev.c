@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
 *
 * This program is free software; you can redistribute it and/or modify
 * it under the terms of the GNU General Public License version 2 and
@@ -23,14 +23,6 @@
 #define DEFAULT_MAX_FRAME_INTERVAL (1*NSEC_PER_SEC)
 #define DEFAULT_MODE ((enum vsg_modes)VSG_MODE_CFR)
 #define MAX_BUFS_BUSY_WITH_ENC 5
-#define TICKS_PER_TIMEOUT 2
-
-
-static void vsg_reset_timer(struct hrtimer *timer, ktime_t time)
-{
-	hrtimer_forward_now(timer, time);
-	hrtimer_restart(timer);
-}
 
 static int vsg_release_input_buffer(struct vsg_context *context,
 		struct vsg_buf_info *buf)
@@ -122,10 +114,9 @@ static void vsg_work_func(struct work_struct *task)
 	INIT_LIST_HEAD(&buf_info->node);
 
 	ktime_get_ts(&buf_info->time);
-	if (work->work_delayed) {
-		buf_info->time = timespec_sub(buf_info->time,
-					context->delayed_frame_interval);
-	}
+	hrtimer_forward_now(&context->threshold_timer, ns_to_ktime(
+				context->max_frame_interval));
+
 	temp = NULL;
 	list_for_each_entry(temp, &context->busy_queue.node, node) {
 		if (mdp_buf_info_equals(&temp->mdp_buf_info,
@@ -236,7 +227,6 @@ static void vsg_timer_helper_func(struct work_struct *task)
 
 		INIT_WORK(&new_work->work, vsg_work_func);
 		new_work->context = context;
-		new_work->work_delayed = work->work_delayed;
 		queue_work(context->work_queue, &new_work->work);
 	}
 
@@ -249,43 +239,25 @@ static enum hrtimer_restart vsg_threshold_timeout_func(struct hrtimer *timer)
 {
 	struct vsg_context *context = NULL;
 	struct vsg_work *task = NULL;
-	int64_t max_frame_interval = 0;
-	context = container_of(timer, struct vsg_context,
-			threshold_timer);
-
-	if (!context) {
-		WFD_MSG_ERR("Context not proper in %s", __func__);
-		goto threshold_err_no_context;
-	}
-	max_frame_interval = context->max_frame_interval;
-	if (list_empty(&context->free_queue.node) && !context->vsync_wait) {
-		context->vsync_wait = true;
-		max_frame_interval = context->max_frame_interval /
-					TICKS_PER_TIMEOUT;
-		goto restart_timer;
-	} else if (context->vsync_wait) {
-			max_frame_interval = context->max_frame_interval /
-						TICKS_PER_TIMEOUT;
-		context->vsync_wait = false;
-	}
 
 	task = kzalloc(sizeof(*task), GFP_ATOMIC);
+	context = container_of(timer, struct vsg_context,
+			threshold_timer);
 	if (!task) {
 		WFD_MSG_ERR("Out of memory in %s", __func__);
 		goto threshold_err_bad_param;
+	} else if (!context) {
+		WFD_MSG_ERR("Context not proper in %s", __func__);
+		goto threshold_err_no_context;
 	}
 
 	INIT_WORK(&task->work, vsg_timer_helper_func);
 	task->context = context;
-	task->work_delayed = false;
-	if (max_frame_interval < context->max_frame_interval)
-		task->work_delayed = true;
 
 	queue_work(context->work_queue, &task->work);
-restart_timer:
 threshold_err_bad_param:
 	hrtimer_forward_now(&context->threshold_timer, ns_to_ktime(
-				max_frame_interval));
+				context->max_frame_interval));
 	return HRTIMER_RESTART;
 threshold_err_no_context:
 	return HRTIMER_NORESTART;
@@ -320,7 +292,6 @@ static int vsg_open(struct v4l2_subdev *sd, void *arg)
 	context->last_buffer = NULL;
 	context->mode = DEFAULT_MODE;
 	context->state = VSG_STATE_NONE;
-	context->vsync_wait = false;
 	mutex_init(&context->mutex);
 
 	sd->dev_priv = context;
@@ -343,7 +314,6 @@ static int vsg_close(struct v4l2_subdev *sd)
 static int vsg_start(struct v4l2_subdev *sd)
 {
 	struct vsg_context *context = NULL;
-	int rc = 0;
 
 	if (!sd) {
 		WFD_MSG_ERR("ERROR, invalid arguments into %s\n", __func__);
@@ -352,24 +322,18 @@ static int vsg_start(struct v4l2_subdev *sd)
 
 	context = (struct vsg_context *)sd->dev_priv;
 
-	mutex_lock(&context->mutex);
 	if (context->state == VSG_STATE_STARTED) {
 		WFD_MSG_ERR("VSG not stopped, start not allowed\n");
-		rc = -EINPROGRESS;
-		goto err_bad_state;
+		return -EINPROGRESS;
 	} else if (context->state == VSG_STATE_ERROR) {
 		WFD_MSG_ERR("VSG in error state, not allowed to restart\n");
-		rc = -ENOTRECOVERABLE;
-		goto err_bad_state;
+		return -ENOTRECOVERABLE;
 	}
 
 	context->state = VSG_STATE_STARTED;
 	hrtimer_start(&context->threshold_timer, ns_to_ktime(context->
 			max_frame_interval), HRTIMER_MODE_REL);
-
-err_bad_state:
-	mutex_unlock(&context->mutex);
-	return rc;
+	return 0;
 }
 
 static int vsg_stop(struct v4l2_subdev *sd)
@@ -460,8 +424,7 @@ static long vsg_queue_buffer(struct v4l2_subdev *sd, void *arg)
 			struct timespec diff = timespec_sub(buf_info->time,
 					context->last_buffer->time);
 			struct timespec temp = ns_to_timespec(
-					context->frame_interval -
-					context->frame_interval_variance);
+						context->frame_interval);
 
 			if (timespec_compare(&diff, &temp) >= 0)
 				push = true;
@@ -474,7 +437,7 @@ static long vsg_queue_buffer(struct v4l2_subdev *sd, void *arg)
 			 * otherwise, diff between two consecutive frames might
 			 * be less than max_frame_interval (for just one sample)
 			 */
-			vsg_reset_timer(&context->threshold_timer,
+			hrtimer_forward_now(&context->threshold_timer,
 				ns_to_ktime(context->max_frame_interval));
 		}
 	}
@@ -499,16 +462,8 @@ queue_err_bad_param:
 static long vsg_return_ip_buffer(struct v4l2_subdev *sd, void *arg)
 {
 	struct vsg_context *context = NULL;
-	struct vsg_buf_info *buf_info = NULL, *temp = NULL,
-			/* last buffer sent for encoding */
-			*last_buffer = NULL,
-			/* buffer we expected to get back, ideally ==
-			 * last_buffer, but might not be if sequence is
-			 * encode, encode, return */
-			*expected_buffer = NULL,
-			/* buffer that we've sent for encoding at some point */
-			*known_buffer = NULL;
-	bool is_last_buffer = false;
+	struct vsg_buf_info *buf_info = NULL, *last_buffer = NULL,
+			*expected_buffer = NULL;
 	int rc = 0;
 
 	if (!arg || !sd) {
@@ -522,47 +477,41 @@ static long vsg_return_ip_buffer(struct v4l2_subdev *sd, void *arg)
 	buf_info = (struct vsg_buf_info *)arg;
 	last_buffer = context->last_buffer;
 
-	WFD_MSG_DBG("Return frame with paddr %p\n",
-			(void *)buf_info->mdp_buf_info.paddr);
-
 	if (!list_empty(&context->busy_queue.node)) {
 		expected_buffer = list_first_entry(&context->busy_queue.node,
 				struct vsg_buf_info, node);
 	}
 
-	list_for_each_entry(temp, &context->busy_queue.node, node) {
-		if (mdp_buf_info_equals(&temp->mdp_buf_info,
-				&buf_info->mdp_buf_info)) {
-			known_buffer = temp;
-			break;
-		}
-	}
+	WFD_MSG_DBG("Return frame with paddr %p\n",
+			(void *)buf_info->mdp_buf_info.paddr);
 
-	if (!expected_buffer || !known_buffer) {
+	if (!expected_buffer) {
 		WFD_MSG_ERR("Unexpectedly received buffer from enc with "
 			"paddr %p\n", (void *)buf_info->mdp_buf_info.paddr);
-		rc = -EBADHANDLE;
 		goto return_ip_buf_bad_buf;
-	} else if (known_buffer != expected_buffer) {
-		/* Buffers can come back out of order if encoder decides to drop
-		 * a frame */
-		WFD_MSG_DBG(
-				"Got a buffer (%p) out of order. Preferred to get %p\n",
-				(void *)known_buffer->mdp_buf_info.paddr,
-				(void *)expected_buffer->mdp_buf_info.paddr);
 	}
 
-	known_buffer->flags &= ~VSG_BUF_BEING_ENCODED;
-	is_last_buffer = context->last_buffer &&
-		mdp_buf_info_equals(
-				&context->last_buffer->mdp_buf_info,
-				&known_buffer->mdp_buf_info);
+	expected_buffer->flags &= ~VSG_BUF_BEING_ENCODED;
+	if (mdp_buf_info_equals(&expected_buffer->mdp_buf_info,
+				&buf_info->mdp_buf_info)) {
+		bool is_same_buffer = context->last_buffer &&
+			mdp_buf_info_equals(
+					&context->last_buffer->mdp_buf_info,
+					&expected_buffer->mdp_buf_info);
 
-	list_del(&known_buffer->node);
-	if (!is_last_buffer &&
-			!(known_buffer->flags & VSG_NEVER_RELEASE)) {
-		vsg_release_input_buffer(context, known_buffer);
-		kfree(known_buffer);
+		list_del(&expected_buffer->node);
+		if (!is_same_buffer &&
+			!(expected_buffer->flags & VSG_NEVER_RELEASE)) {
+			vsg_release_input_buffer(context, expected_buffer);
+			kfree(expected_buffer);
+		}
+	} else {
+		WFD_MSG_ERR("Returned buffer %p is not latest buffer, "
+				"expected %p\n",
+				(void *)buf_info->mdp_buf_info.paddr,
+				(void *)expected_buffer->mdp_buf_info.paddr);
+		rc = -EINVAL;
+		goto return_ip_buf_bad_buf;
 	}
 
 return_ip_buf_bad_buf:
@@ -598,8 +547,7 @@ static long vsg_set_frame_interval(struct v4l2_subdev *sd, void *arg)
 				context->max_frame_interval, interval);
 		context->max_frame_interval = interval;
 	}
-	context->delayed_frame_interval =
-		ns_to_timespec(context->frame_interval / TICKS_PER_TIMEOUT);
+
 	mutex_unlock(&context->mutex);
 	return 0;
 }
@@ -666,61 +614,6 @@ static long vsg_get_max_frame_interval(struct v4l2_subdev *sd, void *arg)
 	context = (struct vsg_context *)sd->dev_priv;
 	mutex_lock(&context->mutex);
 	*(int64_t *)arg = context->max_frame_interval;
-	mutex_unlock(&context->mutex);
-
-	return 0;
-}
-
-static long vsg_set_frame_interval_variance(struct v4l2_subdev *sd, void *arg)
-{
-	struct vsg_context *context = NULL;
-	int64_t variance;
-
-	if (!arg || !sd) {
-		WFD_MSG_ERR("ERROR, invalid arguments into %s\n", __func__);
-		return -EINVAL;
-	}
-
-	context = (struct vsg_context *)sd->dev_priv;
-	variance = *(int64_t *)arg;
-
-	if (variance < 0 || variance > 100) {
-		WFD_MSG_ERR("ERROR, invalid variance %lld%% into %s\n",
-				variance, __func__);
-		return -EINVAL;
-	} else if (context->mode == VSG_MODE_CFR) {
-		WFD_MSG_ERR("Setting FPS variance not supported in CFR mode\n");
-		return -ENOTSUPP;
-	}
-
-	mutex_lock(&context->mutex);
-
-	/* Convert from percentage to a value in nano seconds */
-	variance *= context->frame_interval;
-	do_div(variance, 100);
-
-	context->frame_interval_variance = variance;
-	mutex_unlock(&context->mutex);
-
-	return 0;
-}
-
-static long vsg_get_frame_interval_variance(struct v4l2_subdev *sd, void *arg)
-{
-	struct vsg_context *context = NULL;
-	int64_t variance;
-
-	if (!arg || !sd) {
-		WFD_MSG_ERR("ERROR, invalid arguments into %s\n", __func__);
-		return -EINVAL;
-	}
-
-	context = (struct vsg_context *)sd->dev_priv;
-
-	mutex_lock(&context->mutex);
-	variance = context->frame_interval_variance * 100;
-	do_div(variance, context->frame_interval);
-	*(int64_t *)arg = variance;
 	mutex_unlock(&context->mutex);
 
 	return 0;
@@ -794,12 +687,6 @@ long vsg_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 		break;
 	case VSG_SET_FRAME_INTERVAL:
 		rc = vsg_set_frame_interval(sd, arg);
-		break;
-	case VSG_SET_FRAME_INTERVAL_VARIANCE:
-		rc = vsg_set_frame_interval_variance(sd, arg);
-		break;
-	case VSG_GET_FRAME_INTERVAL_VARIANCE:
-		rc = vsg_get_frame_interval_variance(sd, arg);
 		break;
 	case VSG_GET_MAX_FRAME_INTERVAL:
 		rc = vsg_get_max_frame_interval(sd, arg);
