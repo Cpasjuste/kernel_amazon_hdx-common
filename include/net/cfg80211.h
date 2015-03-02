@@ -2233,6 +2233,9 @@ struct wiphy {
 	 */
 	u32 probe_resp_offload;
 
+	const u8 *extended_capabilities, *extended_capabilities_mask;
+	u8 extended_capabilities_len;
+
 	u8 country_ie_pref;
 
 	/* If multiple wiphys are registered and you're handed e.g.
@@ -2250,7 +2253,7 @@ struct wiphy {
 
 	/* fields below are read-only, assigned by cfg80211 */
 
-	const struct ieee80211_regdomain *regd;
+	const struct ieee80211_regdomain __rcu *regd;
 
 	/* the item in /sys/class/ieee80211/ points to this,
 	 * you need use set_wiphy_dev() (see below) */
@@ -2263,6 +2266,7 @@ struct wiphy {
 	struct dentry *debugfsdir;
 
 	const struct ieee80211_ht_cap *ht_capa_mod_mask;
+	const struct ieee80211_vht_cap *vht_capa_mod_mask;
 
 #ifdef CONFIG_NET_NS
 	/* the network namespace this phy lives in currently */
@@ -2277,7 +2281,9 @@ struct wiphy {
 	const struct nl80211_vendor_cmd_info *vendor_events;
 	int n_vendor_commands, n_vendor_events;
 
-	char priv[0] __attribute__((__aligned__(NETDEV_ALIGN)));
+	const struct wiphy_coalesce_support *coalesce;
+
+	char priv[0] __aligned(NETDEV_ALIGN);
 };
 
 static inline struct net *wiphy_net(struct wiphy *wiphy)
