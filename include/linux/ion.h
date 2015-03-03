@@ -349,7 +349,7 @@ static inline int ion_handle_get_flags(struct ion_client *client,
 struct ion_allocation_data {
 	size_t len;
 	size_t align;
-#if defined(__KERNEL__) || defined(AMZ_HDX)
+#if defined(__KERNEL__)
 	unsigned int heap_mask;
 #else
         /* Userspace wants this renamed... */
