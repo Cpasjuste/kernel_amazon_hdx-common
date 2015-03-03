@@ -328,8 +328,8 @@ int mdss_mdp_smp_reserve(struct mdss_mdp_pipe *pipe)
 		pr_debug("reserving %d mmb for pnum=%d plane=%d\n",
 				num_blks, pipe->num, i);
 		reserved = mdss_mdp_smp_mmb_reserve(&pipe->smp_map[i],
-			num_blks);
-		if (reserved < num_blks, force_alloc)
+			num_blks, force_alloc);
+		if (reserved < num_blks)
 			break;
 	}
 
