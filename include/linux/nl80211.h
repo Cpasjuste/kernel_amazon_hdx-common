@@ -807,8 +807,6 @@ enum nl80211_commands {
 
 	NL80211_CMD_VENDOR,
 
-	NL80211_CMD_SET_QOS_MAP,
-
 	/* add new commands above here */
 
 	/* used to define NL80211_CMD_MAX below */
@@ -1772,9 +1770,8 @@ enum nl80211_attrs {
 	NL80211_ATTR_VENDOR_ID,
 	NL80211_ATTR_VENDOR_SUBCMD,
 	NL80211_ATTR_VENDOR_DATA,
-	NL80211_ATTR_VENDOR_EVENTS,
 
-	NL80211_ATTR_QOS_MAP,
+	NL80211_ATTR_VENDOR_EVENTS,
 
 	/* add attributes here, update the policy in nl80211.c */
 
