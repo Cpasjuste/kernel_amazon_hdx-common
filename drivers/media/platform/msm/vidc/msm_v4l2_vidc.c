@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -34,6 +34,8 @@
 #define BASE_DEVICE_NUMBER 32
 
 struct msm_vidc_drv *vidc_driver;
+
+uint32_t msm_vidc_pwr_collapse_delay = 10000;
 
 static inline struct msm_vidc_inst *get_vidc_inst(struct file *filp, void *fh)
 {
@@ -353,6 +355,31 @@ static ssize_t msm_vidc_link_name_show(struct device *dev,
 
 static DEVICE_ATTR(link_name, 0644, msm_vidc_link_name_show, NULL);
 
+static ssize_t store_pwr_collapse_delay(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	unsigned long val = 0;
+	int rc = 0;
+	rc = kstrtoul(buf, 0, &val);
+	if (rc)
+		return rc;
+	else if (val == 0)
+		return -EINVAL;
+	msm_vidc_pwr_collapse_delay = val;
+	return count;
+}
+
+static ssize_t show_pwr_collapse_delay(struct device *dev,
+		struct device_attribute *attr,
+		char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%u\n", msm_vidc_pwr_collapse_delay);
+}
+
+static DEVICE_ATTR(pwr_collapse_delay, 0644, show_pwr_collapse_delay,
+		store_pwr_collapse_delay);
+
 static int __devinit msm_vidc_probe(struct platform_device *pdev)
 {
 	int rc = 0;
@@ -370,12 +397,22 @@ static int __devinit msm_vidc_probe(struct platform_device *pdev)
 	rc = msm_vidc_initialize_core(pdev, core);
 	if (rc) {
 		dprintk(VIDC_ERR, "Failed to init core\n");
-		goto err_v4l2_register;
+		goto err_core_init;
+	}
+	rc = device_create_file(&pdev->dev, &dev_attr_pwr_collapse_delay);
+	if (rc) {
+		dprintk(VIDC_ERR,
+				"Failed to create pwr_collapse_delay sysfs node");
+		goto err_core_init;
 	}
 	if (core->hfi_type == VIDC_HFI_Q6) {
-		dprintk(VIDC_DBG, "Q6 hfi device probe called\n");
+		dprintk(VIDC_ERR, "Q6 hfi device probe called\n");
 		nr += MSM_VIDC_MAX_DEVICES;
+		core->id = MSM_VIDC_CORE_Q6;
+	} else {
+		core->id = MSM_VIDC_CORE_VENUS;
 	}
+
 	rc = v4l2_device_register(&pdev->dev, &core->v4l2_dev);
 	if (rc) {
 		dprintk(VIDC_ERR, "Failed to register v4l2 device\n");
@@ -428,16 +465,20 @@ static int __devinit msm_vidc_probe(struct platform_device *pdev)
 				vidc_driver->num_cores);
 		goto err_cores_exceeded;
 	}
-	core->id = vidc_driver->num_cores++;
+	vidc_driver->num_cores++;
 	mutex_unlock(&vidc_driver->lock);
 
 	core->device = vidc_hfi_initialize(core->hfi_type, core->id,
 				&core->resources, &handle_cmd_response);
-	if (!core->device) {
-		dprintk(VIDC_ERR, "Failed to create HFI device\n");
+	if (IS_ERR_OR_NULL(core->device)) {
 		mutex_lock(&vidc_driver->lock);
 		vidc_driver->num_cores--;
 		mutex_unlock(&vidc_driver->lock);
+		rc = PTR_ERR(core->device);
+		if (rc != -EPROBE_DEFER)
+			dprintk(VIDC_ERR, "Failed to create HFI device\n");
+		else
+			dprintk(VIDC_DBG, "msm_vidc: request probe defer\n");
 		goto err_cores_exceeded;
 	}
 
@@ -462,6 +503,8 @@ err_dec_attr_link_name:
 err_dec_register:
 	v4l2_device_unregister(&core->v4l2_dev);
 err_v4l2_register:
+	device_remove_file(&pdev->dev, &dev_attr_pwr_collapse_delay);
+err_core_init:
 	kfree(core);
 err_no_mem:
 	return rc;
@@ -498,6 +541,7 @@ static int __devexit msm_vidc_remove(struct platform_device *pdev)
 }
 static const struct of_device_id msm_vidc_dt_match[] = {
 	{.compatible = "qcom,msm-vidc"},
+	{}
 };
 
 MODULE_DEVICE_TABLE(of, msm_vidc_dt_match);

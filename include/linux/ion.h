@@ -23,6 +23,7 @@
 
 struct ion_handle;
 typedef struct ion_handle *ion_user_handle_t;
+
 /**
  * enum ion_heap_types - list of all possible types of heaps
  * @ION_HEAP_TYPE_SYSTEM:	 memory allocated via vmalloc
@@ -39,7 +40,7 @@ enum ion_heap_type {
 	ION_HEAP_TYPE_CHUNK,
 	ION_HEAP_TYPE_CUSTOM, /* must be last so device specific heaps always
 				 are at the end of this enum */
-	ION_NUM_HEAPS = 16,
+	ION_NUM_HEAPS,
 };
 
 #define ION_HEAP_SYSTEM_MASK		(1 << ION_HEAP_TYPE_SYSTEM)
@@ -349,12 +350,7 @@ static inline int ion_handle_get_flags(struct ion_client *client,
 struct ion_allocation_data {
 	size_t len;
 	size_t align;
-#if defined(__KERNEL__)
 	unsigned int heap_mask;
-#else
-        /* Userspace wants this renamed... */
-	unsigned int heap_id_mask;
-#endif
 	unsigned int flags;
 	ion_user_handle_t handle;
 };
