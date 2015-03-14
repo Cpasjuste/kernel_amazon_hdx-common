@@ -2,7 +2,7 @@
  * drivers/gpu/ion/ion_priv.h
  *
  * Copyright (C) 2011 Google, Inc.
- * Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -29,8 +29,6 @@
 #include <linux/sched.h>
 #include <linux/shrinker.h>
 #include <linux/types.h>
-
-#define ION_ALLOC_CLIENT_NAME_SIZE 64
 
 struct ion_buffer *ion_handle_buffer(struct ion_handle *handle);
 
@@ -86,7 +84,6 @@ struct ion_buffer {
 	int handle_count;
 	char task_comm[TASK_COMM_LEN];
 	pid_t pid;
-	char alloc_client_name[ION_ALLOC_CLIENT_NAME_SIZE];
 };
 void ion_buffer_destroy(struct ion_buffer *buffer);
 
@@ -226,6 +223,7 @@ void ion_device_add_heap(struct ion_device *dev, struct ion_heap *heap);
 
 struct pages_mem {
 	struct page **pages;
+	u32 size;
 	void (*free_fn) (const void *);
 };
 
@@ -240,6 +238,8 @@ int ion_heap_map_user(struct ion_heap *, struct ion_buffer *,
 int ion_heap_pages_zero(struct page **pages, int num_pages);
 int ion_heap_buffer_zero(struct ion_buffer *buffer);
 int ion_heap_high_order_page_zero(struct page *page, int order);
+int ion_heap_alloc_pages_mem(struct pages_mem *pages_mem);
+void ion_heap_free_pages_mem(struct pages_mem *pages_mem);
 
 /**
  * ion_heap_init_deferred_free -- initialize deferred free functionality
@@ -377,7 +377,7 @@ struct ion_page_pool {
 
 struct ion_page_pool *ion_page_pool_create(gfp_t gfp_mask, unsigned int order);
 void ion_page_pool_destroy(struct ion_page_pool *);
-void *ion_page_pool_alloc(struct ion_page_pool *);
+void *ion_page_pool_alloc(struct ion_page_pool *, bool *from_pool);
 void ion_page_pool_free(struct ion_page_pool *, struct page *);
 
 /** ion_page_pool_shrink - shrinks the size of the memory cached in the pool

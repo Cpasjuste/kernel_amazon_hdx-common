@@ -244,6 +244,7 @@ struct mdss_dsi_ctrl_pdata {
 	int (*check_status) (struct mdss_dsi_ctrl_pdata *pdata);
 	int (*cmdlist_commit)(struct mdss_dsi_ctrl_pdata *ctrl, int from_mdp);
 	int (*psr_ctrl) (struct mdss_panel_data *pdata, int enable);
+	void (*switch_mode) (struct mdss_panel_data *pdata, int mode);
 	struct mdss_panel_data panel_data;
 	unsigned char *ctrl_base;
 	struct dss_io_data ctrl_io;
@@ -296,6 +297,11 @@ struct mdss_dsi_ctrl_pdata {
 
 	struct dsi_panel_cmds on_cmds;
 	struct dsi_panel_cmds off_cmds;
+	struct dsi_panel_cmds status_cmds;
+	u32 status_value;
+
+	struct dsi_panel_cmds video2cmd;
+	struct dsi_panel_cmds cmd2video;
 
 	struct dcs_cmd_list cmdlist;
 	struct completion dma_comp;
@@ -312,6 +318,8 @@ struct mdss_dsi_ctrl_pdata {
 
 	struct dsi_buf tx_buf;
 	struct dsi_buf rx_buf;
+	struct dsi_buf status_buf;
+	int status_mode;
 };
 
 struct dsi_status_data {

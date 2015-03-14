@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,7 +20,6 @@
 #include <mach/msm_bus_board.h>
 #include <linux/ktime.h>
 #include <linux/delay.h>
-#include <linux/havok.h>   /* ACOS_MOD_ONELINE */
 
 #include "kgsl.h"
 #include "kgsl_pwrscale.h"
@@ -78,6 +77,8 @@ struct clk_pair clks[KGSL_MAX_CLKS] = {
 	},
 };
 
+static void kgsl_pwrctrl_clk(struct kgsl_device *device, int state,
+					int requested_state);
 static void kgsl_pwrctrl_axi(struct kgsl_device *device, int state);
 static void kgsl_pwrctrl_pwrrail(struct kgsl_device *device, int state);
 
@@ -164,13 +165,6 @@ void kgsl_pwrctrl_pwrlevel_change(struct kgsl_device *device,
 	delta = new_level < pwr->active_pwrlevel ? -1 : 1;
 
 	update_clk_statistics(device, true);
-	/* ACOS_MOD_BEGIN */
-	HV_LOG_GPU_PWR(
-		device->pwrctrl.clk_stats.old_clock_time[pwr->active_pwrlevel]
-		+ device->pwrctrl.clk_stats.clock_time[pwr->active_pwrlevel],
-		device->pwrctrl.clk_stats.elapsed_old
-		+ device->pwrctrl.clk_stats.elapsed, new_level);
-	/* ACOS_MOD_END */
 
 	level = pwr->active_pwrlevel;
 
@@ -234,9 +228,9 @@ static int kgsl_pwrctrl_thermal_pwrlevel_store(struct device *dev,
 
 	pwr = &device->pwrctrl;
 
-	ret = kgsl_sysfs_store(buf, count, &level);
+	ret = kgsl_sysfs_store(buf, &level);
 
-	if (ret != count)
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -279,15 +273,16 @@ static int kgsl_pwrctrl_max_pwrlevel_store(struct device *dev,
 {
 	struct kgsl_device *device = kgsl_device_from_dev(dev);
 	struct kgsl_pwrctrl *pwr;
-	int ret, level = 0, max_level;
+	int ret, max_level;
+	unsigned int level = 0;
 
 	if (device == NULL)
 		return 0;
 
 	pwr = &device->pwrctrl;
 
-	ret = kgsl_sysfs_store(buf, count, &level);
-	if (ret != count)
+	ret = kgsl_sysfs_store(buf, &level);
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -330,15 +325,16 @@ static int kgsl_pwrctrl_min_pwrlevel_store(struct device *dev,
 					 const char *buf, size_t count)
 {	struct kgsl_device *device = kgsl_device_from_dev(dev);
 	struct kgsl_pwrctrl *pwr;
-	int ret, level = 0, min_level;
+	int ret, min_level;
+	unsigned int level = 0;
 
 	if (device == NULL)
 		return 0;
 
 	pwr = &device->pwrctrl;
 
-	ret = kgsl_sysfs_store(buf, count, &level);
-	if (ret != count)
+	ret = kgsl_sysfs_store(buf, &level);
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -418,8 +414,8 @@ static int kgsl_pwrctrl_max_gpuclk_store(struct device *dev,
 
 	pwr = &device->pwrctrl;
 
-	ret = kgsl_sysfs_store(buf, count, &val);
-	if (ret != count)
+	ret = kgsl_sysfs_store(buf, &val);
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -470,8 +466,8 @@ static int kgsl_pwrctrl_gpuclk_store(struct device *dev,
 
 	pwr = &device->pwrctrl;
 
-	ret = kgsl_sysfs_store(buf, count, &val);
-	if (ret != count)
+	ret = kgsl_sysfs_store(buf, &val);
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -509,8 +505,8 @@ static int kgsl_pwrctrl_idle_timer_store(struct device *dev,
 		return 0;
 	pwr = &device->pwrctrl;
 
-	ret = kgsl_sysfs_store(buf, count, &val);
-	if (ret != count)
+	ret = kgsl_sysfs_store(buf, &val);
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -548,8 +544,8 @@ static int kgsl_pwrctrl_pmqos_latency_store(struct device *dev,
 	if (device == NULL)
 		return 0;
 
-	ret = kgsl_sysfs_store(buf, count, &val);
-	if (ret != count)
+	ret = kgsl_sysfs_store(buf, &val);
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -692,8 +688,8 @@ static int __force_on_store(struct device *dev,
 	if (device == NULL)
 		return 0;
 
-	ret = kgsl_sysfs_store(buf, count, &val);
-	if (ret != count)
+	ret = kgsl_sysfs_store(buf, &val);
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -767,8 +763,8 @@ static ssize_t kgsl_pwrctrl_bus_split_store(struct device *dev,
 	if (device == NULL)
 		return 0;
 
-	ret = kgsl_sysfs_store(buf, count, &val);
-	if (ret != count)
+	ret = kgsl_sysfs_store(buf, &val);
+	if (ret)
 		return ret;
 
 	kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
@@ -991,7 +987,6 @@ static void kgsl_pwrctrl_pwrrail(struct kgsl_device *device, int state)
 	if (state == KGSL_PWRFLAGS_OFF) {
 		if (test_and_clear_bit(KGSL_PWRFLAGS_POWER_ON,
 			&pwr->power_flags)) {
-			HV_LOG_GPU_RAIL(0);  /* ACOS_MOD_ONELINE */
 			trace_kgsl_rail(device, state);
 			if (pwr->gpu_cx)
 				regulator_disable(pwr->gpu_cx);
@@ -1001,7 +996,6 @@ static void kgsl_pwrctrl_pwrrail(struct kgsl_device *device, int state)
 	} else if (state == KGSL_PWRFLAGS_ON) {
 		if (!test_and_set_bit(KGSL_PWRFLAGS_POWER_ON,
 			&pwr->power_flags)) {
-			HV_LOG_GPU_RAIL(1);  /* ACOS_MOD_ONELINE */
 			trace_kgsl_rail(device, state);
 			if (pwr->gpu_reg) {
 				int status = regulator_enable(pwr->gpu_reg);
@@ -1434,6 +1428,7 @@ _slumber(struct kgsl_device *device)
 		del_timer_sync(&device->idle_timer);
 		/* make sure power is on to stop the device*/
 		kgsl_pwrctrl_enable(device);
+		kgsl_pwrctrl_irq(device, KGSL_PWRFLAGS_ON);
 		device->ftbl->suspend_context(device);
 		device->ftbl->stop(device);
 		_sleep_accounting(device);
@@ -1720,16 +1715,21 @@ static int _check_active_count(struct kgsl_device *device, int count)
 int kgsl_active_count_wait(struct kgsl_device *device, int count)
 {
 	int result = 0;
+	long wait_jiffies = HZ;
 
 	BUG_ON(!mutex_is_locked(&device->mutex));
 
-	if (atomic_read(&device->active_cnt) > count) {
-		int ret;
+	while (atomic_read(&device->active_cnt) > count) {
+		long ret;
 		kgsl_mutex_unlock(&device->mutex, &device->mutex_owner);
 		ret = wait_event_timeout(device->active_cnt_wq,
-			_check_active_count(device, count), HZ);
+			_check_active_count(device, count), wait_jiffies);
 		kgsl_mutex_lock(&device->mutex, &device->mutex_owner);
 		result = ret == 0 ? -ETIMEDOUT : 0;
+		if (!result)
+			wait_jiffies = ret;
+		else
+			break;
 	}
 
 	return result;

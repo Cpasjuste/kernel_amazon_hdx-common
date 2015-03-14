@@ -29,9 +29,7 @@
 #include <linux/async.h>
 #include <linux/suspend.h>
 #include <linux/timer.h>
-#ifdef CONFIG_AMAZON_METRICS_LOG
-#include <linux/metricslog.h>
-#endif
+
 #include "../base.h"
 #include "power.h"
 
@@ -366,10 +364,7 @@ static void dpm_show_time(ktime_t starttime, pm_message_t state, char *info)
 	ktime_t calltime;
 	u64 usecs64;
 	int usecs;
-#ifdef CONFIG_AMAZON_METRICS_LOG
-	const char *verb;
-	char dpm_metrics_buf[128];
-#endif
+
 	calltime = ktime_get();
 	usecs64 = ktime_to_ns(ktime_sub(calltime, starttime));
 	do_div(usecs64, NSEC_PER_USEC);
@@ -379,15 +374,6 @@ static void dpm_show_time(ktime_t starttime, pm_message_t state, char *info)
 	pr_info("PM: %s%s%s of devices complete after %ld.%03ld msecs\n",
 		info ?: "", info ? " " : "", pm_verb(state.event),
 		usecs / USEC_PER_MSEC, usecs % USEC_PER_MSEC);
-
-#ifdef CONFIG_AMAZON_METRICS_LOG
-	verb = pm_verb(state.event);
-	snprintf(dpm_metrics_buf, sizeof(dpm_metrics_buf),
-	"dpmst:dpmd%c:time_ms=%ld;TI;1,%s%s%s_dpm_complete=1;CT;1:NR",
-	info ? info[0] : verb[0], usecs / USEC_PER_MSEC, info ? : "",
-	info ? " " : "", verb);
-	log_to_amzmain(ANDROID_LOG_INFO, "dpm", dpm_metrics_buf);
-#endif
 }
 
 static int dpm_run_callback(pm_callback_t cb, struct device *dev,
