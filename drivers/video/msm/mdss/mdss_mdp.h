@@ -19,6 +19,7 @@
 #include <linux/msm_mdp.h>
 #include <linux/platform_device.h>
 #include <linux/notifier.h>
+#include <linux/kref.h>
 
 #include "mdss.h"
 #include "mdss_mdp_hwio.h"
@@ -32,6 +33,7 @@
 #define MDP_CLK_DEFAULT_RATE	200000000
 #define PHASE_STEP_SHIFT	21
 #define MAX_MIXER_WIDTH		2048
+#define MAX_LINE_BUFFER_WIDTH	2048
 #define MAX_MIXER_HEIGHT	0xFFFF
 #define MAX_IMG_WIDTH		0x3FFF
 #define MAX_IMG_HEIGHT		0x3FFF
@@ -327,6 +329,7 @@ struct mdss_ad_info {
 	uint32_t bl_bright_shift;
 	uint32_t bl_lin[AD_BL_LIN_LEN];
 	uint32_t bl_lin_inv[AD_BL_LIN_LEN];
+	uint32_t bl_att_lut[AD_BL_ATT_LUT_LEN];
 };
 
 struct pp_sts_type {
@@ -356,6 +359,11 @@ struct mdss_mdp_pipe_smp_map {
 	DECLARE_BITMAP(fixed, MAX_DRV_SUP_MMB_BLKS);
 };
 
+struct mdss_mdp_shared_reg_ctrl {
+	u32 reg_off;
+	u32 bit_off;
+};
+
 struct mdss_mdp_pipe {
 	u32 num;
 	u32 type;
@@ -363,7 +371,11 @@ struct mdss_mdp_pipe {
 	char __iomem *base;
 	u32 ftch_id;
 	u32 xin_id;
-	atomic_t ref_cnt;
+	struct mdss_mdp_shared_reg_ctrl clk_ctrl;
+	struct mdss_mdp_shared_reg_ctrl clk_status;
+
+	struct kref kref;
+
 	u32 play_cnt;
 	int pid;
 	bool is_handed_off;
@@ -459,6 +471,16 @@ enum mdss_screen_state {
 };
 
 #define is_vig_pipe(_pipe_id_) ((_pipe_id_) <= MDSS_MDP_SSPP_VIG2)
+
+static inline struct mdss_mdp_ctl *mdss_mdp_get_split_ctl(
+	struct mdss_mdp_ctl *ctl)
+{
+	if (ctl && ctl->mixer_right && (ctl->mixer_right->ctl != ctl))
+		return ctl->mixer_right->ctl;
+
+	return NULL;
+}
+
 static inline void mdss_mdp_ctl_write(struct mdss_mdp_ctl *ctl,
 				      u32 reg, u32 val)
 {
@@ -479,6 +501,17 @@ static inline void mdss_mdp_pingpong_write(struct mdss_mdp_mixer *mixer,
 static inline u32 mdss_mdp_pingpong_read(struct mdss_mdp_mixer *mixer, u32 reg)
 {
 	return readl_relaxed(mixer->pingpong_base + reg);
+}
+
+static inline int mdss_mdp_iommu_dyn_attach_supported(
+	struct mdss_data_type *mdata)
+{
+	return (mdata->mdp_rev >= MDSS_MDP_HW_REV_103);
+}
+
+static inline int mdss_mdp_line_buffer_width(void)
+{
+	return MAX_LINE_BUFFER_WIDTH;
 }
 
 irqreturn_t mdss_mdp_isr(int irq, void *ptr);
@@ -644,7 +677,7 @@ int mdss_mdp_pipe_fetch_halt(struct mdss_mdp_pipe *pipe);
 int mdss_mdp_data_check(struct mdss_mdp_data *data,
 			struct mdss_mdp_plane_sizes *ps);
 int mdss_mdp_get_plane_sizes(u32 format, u32 w, u32 h,
-			     struct mdss_mdp_plane_sizes *ps, u32 bwc_mode);
+	     struct mdss_mdp_plane_sizes *ps, u32 bwc_mode, bool rotation);
 int mdss_mdp_get_rau_strides(u32 w, u32 h, struct mdss_mdp_format_params *fmt,
 			       struct mdss_mdp_plane_sizes *ps);
 void mdss_mdp_data_calc_offset(struct mdss_mdp_data *data, u16 x, u16 y,
@@ -683,7 +716,7 @@ struct mdss_mdp_ctl *mdss_mdp_ctl_mixer_switch(struct mdss_mdp_ctl *ctl,
 void mdss_mdp_set_roi(struct mdss_mdp_ctl *ctl,
 					struct mdp_display_commit *data);
 
-int mdss_mdp_wb_set_format(struct msm_fb_data_type *mfd, int dst_format);
+int mdss_mdp_wb_set_format(struct msm_fb_data_type *mfd, u32 dst_format);
 int mdss_mdp_wb_get_format(struct msm_fb_data_type *mfd,
 					struct mdp_mixer_cfg *mixer_cfg);
 

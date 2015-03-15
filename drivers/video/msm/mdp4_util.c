@@ -32,7 +32,6 @@
 #include "mdp.h"
 #include "msm_fb.h"
 #include "mdp4.h"
-#include <linux/trapz.h>   /* ACOS_MOD_ONELINE */
 
 struct mdp4_statistic mdp4_stat;
 
@@ -644,12 +643,6 @@ irqreturn_t mdp4_isr(int irq, void *ptr)
 #endif	/* OVERLAY */
 
 	if (isr & INTR_PRIMARY_VSYNC) {
-		/* ACOS_MOD_BEGIN */
-		TRAPZ_DESCRIBE(TRAPZ_KERN_DISP, Vsyncirq,
-				"Primary VSYNC interrupt");
-		TRAPZ_LOG(TRAPZ_LOG_DEBUG, TRAPZ_CAT_KERNEL, TRAPZ_KERN_DISP,
-				Vsyncirq, 0, 0, 0, 0);
-		/* ACOS_MOD_END */
 		mdp4_stat.intr_vsync_p++;
 		if (panel & MDP4_PANEL_LCDC)
 			mdp4_primary_vsync_lcdc();

@@ -95,6 +95,7 @@ static int __mdss_fb_display_thread(void *data);
 static int mdss_fb_pan_idle(struct msm_fb_data_type *mfd);
 static int mdss_fb_send_panel_event(struct msm_fb_data_type *mfd,
 					int event, void *arg);
+static void mdss_fb_set_mdp_sync_pt_threshold(struct msm_fb_data_type *mfd);
 void mdss_fb_no_update_notify_timer_cb(unsigned long data)
 {
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)data;
@@ -268,22 +269,30 @@ static ssize_t mdss_fb_get_type(struct device *dev,
 
 static void mdss_fb_parse_dt(struct msm_fb_data_type *mfd)
 {
-	u32 data[2];
+	u32 data[2] = {0};
+	u32 panel_xres;
 	struct platform_device *pdev = mfd->pdev;
 
-	if (of_property_read_u32_array(pdev->dev.of_node, "qcom,mdss-fb-split",
-				       data, 2))
-		return;
-	if (data[0] && data[1] &&
-	    (mfd->panel_info->xres == (data[0] + data[1]))) {
-		mfd->split_fb_left = data[0];
-		mfd->split_fb_right = data[1];
-		pr_info("split framebuffer left=%d right=%d\n",
-			mfd->split_fb_left, mfd->split_fb_right);
+	of_property_read_u32_array(pdev->dev.of_node,
+		"qcom,mdss-fb-split", data, 2);
+
+	panel_xres = mfd->panel_info->xres;
+	if (data[0] && data[1]) {
+		if (mfd->split_display)
+			panel_xres *= 2;
+
+		if (panel_xres == data[0] + data[1]) {
+			mfd->split_fb_left = data[0];
+			mfd->split_fb_right = data[1];
+		}
 	} else {
-		mfd->split_fb_left = 0;
-		mfd->split_fb_right = 0;
+		if (mfd->split_display)
+			mfd->split_fb_left = mfd->split_fb_right = panel_xres;
+		else
+			mfd->split_fb_left = mfd->split_fb_right = 0;
 	}
+	pr_info("split framebuffer left=%d right=%d\n",
+		mfd->split_fb_left, mfd->split_fb_right);
 }
 
 static ssize_t mdss_fb_get_split(struct device *dev,
@@ -367,12 +376,117 @@ static ssize_t mdss_fb_get_idle_notify(struct device *dev,
 	return ret;
 }
 
+static ssize_t mdss_fb_get_panel_info(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct fb_info *fbi = dev_get_drvdata(dev);
+	struct msm_fb_data_type *mfd = fbi->par;
+	struct mdss_panel_info *pinfo = mfd->panel_info;
+	int ret;
+
+	ret = scnprintf(buf, PAGE_SIZE,
+			"pu_en=%d\nxstart=%d\nwalign=%d\nystart=%d\nhalign=%d\n"
+			"min_w=%d\nmin_h=%d",
+			pinfo->partial_update_enabled, pinfo->xstart_pix_align,
+			pinfo->width_pix_align, pinfo->ystart_pix_align,
+			pinfo->height_pix_align, pinfo->min_width,
+			pinfo->min_height);
+
+	return ret;
+}
+
+/*
+ * mdss_fb_lpm_enable() - Function to Control LowPowerMode
+ * @mfd:	Framebuffer data structure for display
+ * @mode:	Enabled/Disable LowPowerMode
+ *		1: Enter into LowPowerMode
+ *		0: Exit from LowPowerMode
+ *
+ * This Function dynamically switches to and from LowPowerMode
+ * based on the argument @mode.
+ */
+static int mdss_fb_lpm_enable(struct msm_fb_data_type *mfd, int mode)
+{
+	int ret = 0;
+	u32 bl_lvl = 0;
+	struct mdss_panel_info *pinfo = NULL;
+	struct mdss_panel_data *pdata;
+
+	if (!mfd || !mfd->panel_info)
+		return -EINVAL;
+
+	pinfo = mfd->panel_info;
+
+	if (!pinfo->mipi.dynamic_switch_enabled) {
+		pr_warn("Panel does not support dynamic switch!\n");
+		return 0;
+	}
+
+	if (mode == pinfo->mipi.mode) {
+		pr_debug("Already in requested mode!\n");
+		return 0;
+	}
+
+	pdata = dev_get_platdata(&mfd->pdev->dev);
+
+	pr_debug("Enter mode: %d\n", mode);
+	pdata->panel_info.dynamic_switch_pending = true;
+
+	mutex_lock(&mfd->bl_lock);
+	bl_lvl = mfd->bl_level;
+	mdss_fb_set_backlight(mfd, 0);
+	mutex_unlock(&mfd->bl_lock);
+
+	lock_fb_info(mfd->fbi);
+	ret = mdss_fb_blank_sub(FB_BLANK_POWERDOWN, mfd->fbi,
+						mfd->op_enable);
+	if (ret) {
+		pr_err("can't turn off display!\n");
+		unlock_fb_info(mfd->fbi);
+		return ret;
+	}
+
+	mfd->op_enable = false;
+
+	ret = mfd->mdp.configure_panel(mfd, mode);
+	mdss_fb_set_mdp_sync_pt_threshold(mfd);
+
+	mfd->op_enable = true;
+
+	ret = mdss_fb_blank_sub(FB_BLANK_UNBLANK, mfd->fbi,
+					mfd->op_enable);
+	if (ret) {
+		pr_err("can't turn on display!\n");
+		unlock_fb_info(mfd->fbi);
+		return ret;
+	}
+	unlock_fb_info(mfd->fbi);
+
+	mutex_lock(&mfd->bl_lock);
+	mfd->bl_updated = true;
+	mdss_fb_set_backlight(mfd, bl_lvl);
+	mutex_unlock(&mfd->bl_lock);
+
+	pdata->panel_info.dynamic_switch_pending = false;
+	pdata->panel_info.is_lpm_mode = mode ? 1 : 0;
+
+	if (ret) {
+		pr_err("can't turn on display!\n");
+		return ret;
+	}
+
+	pr_debug("Exit mode: %d\n", mode);
+
+	return 0;
+}
+
 static DEVICE_ATTR(msm_fb_type, S_IRUGO, mdss_fb_get_type, NULL);
 static DEVICE_ATTR(msm_fb_split, S_IRUGO, mdss_fb_get_split, NULL);
 static DEVICE_ATTR(show_blank_event, S_IRUGO, mdss_mdp_show_blank_event, NULL);
 static DEVICE_ATTR(idle_time, S_IRUGO | S_IWUSR | S_IWGRP,
 	mdss_fb_get_idle_time, mdss_fb_set_idle_time);
 static DEVICE_ATTR(idle_notify, S_IRUGO, mdss_fb_get_idle_notify, NULL);
+static DEVICE_ATTR(msm_fb_panel_info, S_IRUGO, mdss_fb_get_panel_info, NULL);
 
 static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_msm_fb_type.attr,
@@ -380,6 +494,7 @@ static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_show_blank_event.attr,
 	&dev_attr_idle_time.attr,
 	&dev_attr_idle_notify.attr,
+	&dev_attr_msm_fb_panel_info.attr,
 	NULL,
 };
 
@@ -511,6 +626,21 @@ static int mdss_fb_probe(struct platform_device *pdev)
 			__mdss_fb_sync_buf_done_callback;
 	}
 
+	mdss_fb_set_mdp_sync_pt_threshold(mfd);
+
+	/*if (mfd->mdp.splash_init_fnc)
+		mfd->mdp.splash_init_fnc(mfd);*/
+
+	INIT_DELAYED_WORK(&mfd->idle_notify_work, __mdss_fb_idle_notify_work);
+
+	return rc;
+}
+
+static void mdss_fb_set_mdp_sync_pt_threshold(struct msm_fb_data_type *mfd)
+{
+	if (!mfd)
+		return;
+
 	switch (mfd->panel.type) {
 	case WRITEBACK_PANEL:
 		mfd->mdp_sync_pt_data.threshold = 1;
@@ -525,9 +655,6 @@ static int mdss_fb_probe(struct platform_device *pdev)
 		mfd->mdp_sync_pt_data.retire_threshold = 0;
 		break;
 	}
-
-	INIT_DELAYED_WORK(&mfd->idle_notify_work, __mdss_fb_idle_notify_work);
-	return rc;
 }
 
 static int mdss_fb_remove(struct platform_device *pdev)
@@ -1634,6 +1761,7 @@ static int __mdss_fb_sync_buf_done_callback(struct notifier_block *p,
 		mdss_fb_signal_timeline(sync_pt_data);
 		break;
 	}
+
 	return NOTIFY_OK;
 }
 
@@ -1694,7 +1822,11 @@ static int mdss_fb_pan_display_ex(struct fb_info *info,
 	u32 wait_for_finish = disp_commit->wait_for_finish;
 	int ret = 0;
 
-	if (!mfd || (!mfd->op_enable) || (!mfd->panel_power_on))
+	if (!mfd || (!mfd->op_enable))
+		return -EPERM;
+
+	if ((!mfd->panel_power_on) && !((mfd->dcm_state == DCM_ENTER) &&
+				(mfd->panel.type == MIPI_CMD_PANEL)))
 		return -EPERM;
 
 	if (var->xoffset > (info->var.xres_virtual - info->var.xres))
@@ -1746,7 +1878,11 @@ static int mdss_fb_pan_display_sub(struct fb_var_screeninfo *var,
 {
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
 
-	if ((!mfd->op_enable) || (!mfd->panel_power_on))
+	if (!mfd->op_enable)
+		return -EPERM;
+
+	if ((!mfd->panel_power_on) && !((mfd->dcm_state == DCM_ENTER) &&
+				(mfd->panel.type == MIPI_CMD_PANEL)))
 		return -EPERM;
 
 	if (var->xoffset > (info->var.xres_virtual - info->var.xres))
@@ -1773,14 +1909,8 @@ static int mdss_fb_pan_display_sub(struct fb_var_screeninfo *var,
 }
 
 static void mdss_fb_var_to_panelinfo(struct fb_var_screeninfo *var,
-	struct mdss_panel_info *pinfo, bool split_screen)
+	struct mdss_panel_info *pinfo)
 {
-        if (split_screen) {
-                // Don't allow frambuffer-level ioctl to change geometry
-                // of split screen configuration - the interface is
-                // not parameterized appropriately for a dual screen.
-                return;
-        }
 	pinfo->xres = var->xres;
 	pinfo->yres = var->yres;
 	pinfo->lcdc.v_front_porch = var->lower_margin;
@@ -1970,7 +2100,7 @@ static int mdss_fb_check_var(struct fb_var_screeninfo *var,
 		int rc;
 
 		memcpy(&panel_info, mfd->panel_info, sizeof(panel_info));
-		mdss_fb_var_to_panelinfo(var, &panel_info, mfd->split_display);
+		mdss_fb_var_to_panelinfo(var, &panel_info);
 		rc = mdss_fb_send_panel_event(mfd, MDSS_EVENT_CHECK_PARAMS,
 			&panel_info);
 		if (IS_ERR_VALUE(rc))
@@ -2032,10 +2162,12 @@ static int mdss_fb_set_par(struct fb_info *info)
 	else
 		mfd->fbi->fix.line_length = var->xres * var->bits_per_pixel / 8;
 
+	mfd->fbi->fix.smem_len = mfd->fbi->fix.line_length *
+					mfd->fbi->var.yres_virtual;
 
 	if (mfd->panel_reconfig || (mfd->fb_imgType != old_imgType)) {
 		mdss_fb_blank_sub(FB_BLANK_POWERDOWN, info, mfd->op_enable);
-		mdss_fb_var_to_panelinfo(var, mfd->panel_info, mfd->split_display);
+		mdss_fb_var_to_panelinfo(var, mfd->panel_info);
 		mdss_fb_blank_sub(FB_BLANK_UNBLANK, info, mfd->op_enable);
 		mfd->panel_reconfig = false;
 	}
@@ -2334,7 +2466,8 @@ static int __ioctl_wait_idle(struct msm_fb_data_type *mfd, u32 cmd)
 		(cmd != MSMFB_OVERLAY_VSYNC_CTRL) &&
 		(cmd != MSMFB_ASYNC_BLIT) &&
 		(cmd != MSMFB_BLIT) &&
-		(cmd != MSMFB_NOTIFY_UPDATE)) {
+		(cmd != MSMFB_NOTIFY_UPDATE) &&
+		(cmd != MSMFB_OVERLAY_PREPARE)) {
 		ret = mdss_fb_pan_idle(mfd);
 	}
 
@@ -2352,6 +2485,8 @@ static int mdss_fb_ioctl(struct fb_info *info, unsigned int cmd,
 	int ret = -ENOSYS;
 	struct mdp_buf_sync buf_sync;
 	struct msm_sync_pt_data *sync_pt_data = NULL;
+	unsigned int dsi_mode = 0;
+
 	if (!info || !info->par)
 		return -EINVAL;
 	mfd = (struct msm_fb_data_type *)info->par;
@@ -2404,6 +2539,16 @@ static int mdss_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		ret = mdss_fb_display_commit(info, argp);
 		break;
 
+	case MSMFB_LPM_ENABLE:
+		ret = copy_from_user(&dsi_mode, argp, sizeof(dsi_mode));
+		if (ret) {
+			pr_err("%s: MSMFB_LPM_ENABLE ioctl failed\n", __func__);
+			goto exit;
+		}
+
+		ret = mdss_fb_lpm_enable(mfd, dsi_mode);
+		break;
+
 	default:
 		if (mfd->mdp.ioctl_handler)
 			ret = mfd->mdp.ioctl_handler(mfd, cmd, argp);
@@ -2412,6 +2557,7 @@ static int mdss_fb_ioctl(struct fb_info *info, unsigned int cmd,
 
 	if (ret == -ENOSYS)
 		pr_err("unsupported ioctl (%x)\n", cmd);
+exit:
 
 	return ret;
 }
@@ -2500,7 +2646,8 @@ int mdss_register_panel(struct platform_device *pdev,
 		pr_info("adding framebuffer device %s\n", dev_name(&pdev->dev));
 		fb_pdev = of_platform_device_create(node, NULL,
 				&mdss_pdev->dev);
-		fb_pdev->dev.platform_data = pdata;
+		if (fb_pdev)
+			fb_pdev->dev.platform_data = pdata;
 	}
 
 	if (master_panel && mdp_instance->panel_register_done)

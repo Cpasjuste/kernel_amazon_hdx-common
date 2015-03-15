@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -32,7 +32,7 @@
 
 #define STATUS_CHECK_INTERVAL_MS 5000
 #define STATUS_CHECK_INTERVAL_MIN_MS 200
-#define DSI_STATUS_CHECK_DISABLE 1
+#define DSI_STATUS_CHECK_DISABLE 0
 
 static uint32_t interval = STATUS_CHECK_INTERVAL_MS;
 static uint32_t dsi_status_disable = DSI_STATUS_CHECK_DISABLE;

@@ -20,15 +20,6 @@
 #include <linux/sysdev.h>
 #include <linux/power_supply.h>
 #include <linux/slab.h>
-#if defined(CONFIG_AMAZON_METRICS_LOG)
-#include <linux/metricslog.h>
-#if defined(CONFIG_EARLYSUSPEND)
-#include <linux/earlysuspend.h>
-#elif defined(CONFIG_FB)
-#include <linux/notifier.h>
-#include <linux/fb.h>
-#endif
-#endif /* defined(CONFIG_AMAZON_METRICS_LOG) */
 
 #if defined(CONFIG_ARCH_MSM8974_APOLLO)
 #include "battery_bq27x41.h"
@@ -860,87 +851,6 @@ static enum power_supply_property bq27x41_battery_props[] = {
 	/* ACOS_MOD_END {metrics_log} */
 };
 
-#if defined(CONFIG_AMAZON_METRICS_LOG)
-static void bq27x41_log_metrics(struct bq27x41_info *info, char *msg,
-					char *metricsmsg)
-{
-	int value = info->battery_capacity;
-
-	struct timespec curr = current_kernel_time();
-       /* Compute elapsed time and determine screen off or on drainage */
-       struct timespec diff = timespec_sub(curr,
-			info->early_suspend_time);
-
-	if (info->early_suspend_capacity != -1) {
-		char buf[512];
-		snprintf(buf, sizeof(buf),
-			"%s:def:value=%d;CT;1,elapsed=%ld;TI;1:NR",
-			metricsmsg,
-			info->early_suspend_capacity - value,
-			diff.tv_sec * 1000 + diff.tv_nsec / NSEC_PER_MSEC);
-		log_to_metrics(ANDROID_LOG_INFO, "drain_metrics", buf);
-		dev_info(&bq27x41_battery_i2c_client->dev,
-			"%s: %d %% over %ld msecs\n", msg,
-			info->early_suspend_capacity - value,
-			diff.tv_sec * 1000 + diff.tv_nsec / NSEC_PER_MSEC);
-	}
-	/* Cache the current capacity */
-	info->early_suspend_capacity = info->battery_capacity;
-	/* Mark the suspend or resume time */
-	info->early_suspend_time = curr;
-}
-static void bq27x41_early_suspend(struct bq27x41_info *info)
-{
-	bq27x41_log_metrics(info, "Screen on drainage", "screen_on_drain");
-}
-
-static void bq27x41_late_resume(struct bq27x41_info *info)
-{
-	bq27x41_log_metrics(info, "Screen off drainage", "screen_off_drain");
-}
-
-#if defined(CONFIG_EARLYSUSPEND)
-static void bq27x41_early_suspend_cb(struct early_suspend *handler)
-{
-	struct bq27x41_info *info = container_of(handler,
-			struct bq27x41_info, early_suspend);
-
-	bq27x41_early_suspend(info);
-}
-
-static void bq27x41_late_resume_cb(struct early_suspend *handler)
-{
-	struct bq27x41_info *info = container_of(handler,
-			struct bq27x41_info, early_suspend);
-
-	bq27x41_late_resume(info);
-}
-
-#elif defined(CONFIG_FB)
-static int fb_notifier_callback(struct notifier_block *self,
-				 unsigned long event, void *data)
-{
-	struct fb_event *evdata = data;
-	int *blank;
-	struct bq27x41_info *info = container_of(self,
-						struct bq27x41_info, fb_notif);
-
-	if (evdata && evdata->data && event == FB_EVENT_BLANK &&
-		info && info->client) {
-		blank = evdata->data;
-
-		if (*blank == FB_BLANK_UNBLANK)
-			bq27x41_late_resume(info);
-		else if (*blank == FB_BLANK_POWERDOWN)
-			bq27x41_early_suspend(info);
-	}
-
-	return 0;
-}
-
-#endif
-#endif /* defined(CONFIG_AMAZON_METRICS_LOG) */
-
 static ssize_t bq27x41_poll_interval_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
 {
@@ -1066,24 +976,6 @@ static int bq27x41_probe(struct i2c_client *client, const struct i2c_device_id *
 	schedule_delayed_work(&info->battery_work,
 		msecs_to_jiffies(BQ27X41_BATTERY_INTERVAL_EARLY));
 
-#if defined(CONFIG_AMAZON_METRICS_LOG)
-
-#if defined(CONFIG_EARLYSUSPEND)
-	info->early_suspend.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1;
-	info->early_suspend.suspend = bq27x41_early_suspend_cb;
-	info->early_suspend.resume = bq27x41_late_resume_cb;
-	register_early_suspend(&info->early_suspend);
-
-#elif defined(CONFIG_FB)
-	info->fb_notif.notifier_call = fb_notifier_callback;
-	ret = fb_register_client(&info->fb_notif);
-	if (ret)
-		dev_err(&client->dev, "Unable to register fb_notifier: %d\n",
-			ret);
-#endif
-
-#endif /* defined(CONFIG_AMAZON_METRICS_LOG) */
-
 	pr_info("%s: probe succeeded\n", DRIVER_NAME);
 
         return 0;
@@ -1156,7 +1048,6 @@ static int bq27x41_battery_suspend(struct i2c_client *client, pm_message_t state
 		info->i2c_err = 0;
                 info->suspend_capacity_high = -1;
 	} else {
-		char buf[512];
 		/*
 		 * Cache capacity values
 		 */
@@ -1170,14 +1061,14 @@ static int bq27x41_battery_suspend(struct i2c_client *client, pm_message_t state
 		 * drain_metrics: <event>: field1=value1 field2=value2 ....
 		 */
 
-		snprintf(buf, sizeof(buf),
+		/*snprintf(buf, sizeof(buf),
 				"batt_suspend: charge_now=%d charge_full=%d "
 				"charge_now_design=%d charge_full_design=%d\n",
 			info->battery_remaining_charge,
 			info->battery_full_charge,
 			info->battery_remaining_charge_design,
 			info->battery_full_charge_design);
-		log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
+		log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);*/
 	}
 
 	/* Mark the suspend time */
@@ -1190,7 +1081,6 @@ static int bq27x41_battery_resume(struct i2c_client *client)
 {
 	int err = 0, value = 0;
 	struct bq27x41_info *info = i2c_get_clientdata(client);
-	int cap_drain, hp_drain;
 #if defined(CONFIG_AMAZON_METRICS_LOG)
 	struct timespec diff;
 	long suspend_time;
@@ -1294,91 +1184,6 @@ static int bq27x41_battery_resume(struct i2c_client *client)
 
 	/* Report to upper layers */
 	power_supply_changed(&info->battery);
-
-#if defined(CONFIG_AMAZON_METRICS_LOG)
-	if (info->battery_status == POWER_SUPPLY_STATUS_CHARGING)
-		goto skip_metrics;
-
-	/* Compute elapsed time and determine suspend drainage */
-	diff = timespec_sub(current_kernel_time(), info->suspend_time);
-	suspend_time = diff.tv_sec * 1000 + diff.tv_nsec / NSEC_PER_MSEC;
-	info->suspend_realtime += diff.tv_sec;
-
-	if (likely(!err)) {
-		if (info->suspend_capacity >= 0) {
-			cap_drain = info->suspend_capacity -
-				info->battery_capacity;
-			info->suspend_drain += cap_drain;
-		}
-
-		if (info->suspend_capacity_high >= 0) {
-			int capacity_high =
-				info->battery_remaining_charge * 10000 /
-				info->battery_full_charge;
-			/* This delta will be negative when charging on AC, and
-			 * possibly also in the case of an SOC jump. */
-			hp_drain = info->suspend_capacity_high - capacity_high;
-			info->suspend_drain_high += hp_drain;
-		} else {
-			/* Re-setting this to -1 now, so it's a copy of the
-			 * original code. IMHO, we should not touch the
-			 * suspend_drain_high at all if we fail due to i2c
-			 * read errors so battery stats can continue from where
-			 * it left of. This will skew our suspend drain metrics
-			 * in case of i2c errors - SSP
-			 */
-			info->suspend_drain_high = -1;
-			err = -EIO;
-		}
-	}
-
-	/* Accumulate everything upto here and dump it all at once
-	 * in a format that makes post processing easy, not that it was
-	 * extremely difficult before, but there was too much churn.
-	 *
-	 * Also, stop dumping into kernel logs, instead put everything in
-	 * amazon_main so it will be saved by Logmanager
-	 *
-	 * All drain logs are in following format ..
-	 *
-	 * drain_metrics: <event>: field1=value1 field2=value2 ....
-	 */
-	if (unlikely(err)) {
-		char buf[128];
-		snprintf(buf, sizeof(buf),
-			"update susp drain fail: err=%d"
-			"suspend_cap=%d suspend_cap_high=%d\n",
-			err, info->suspend_capacity,
-			info->suspend_capacity_high);
-		log_to_amzmain(ANDROID_LOG_ERROR, "bq27x41", buf);
-	} else {
-		char buf[512];
-		int rc;
-
-		snprintf(buf, sizeof(buf),
-				"batt_resume: charge_now=%d charge_full=%d "
-				"charge_now_design=%d charge_full_design=%d\n",
-			info->battery_remaining_charge,
-			info->battery_full_charge,
-			info->battery_remaining_charge_design,
-			info->battery_full_charge_design);
-		log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
-
-		rc = snprintf(buf, sizeof(buf),
-				"suspend_drain: hp_drain=%d elapsed=%ld"
-				" cap_drain=%d cap=%d current=%d voltage=%d"
-				" temp=%d\n",
-				hp_drain, suspend_time, cap_drain,
-				info->battery_capacity,
-				info->battery_current,
-				info->battery_voltage,
-				info->battery_temperature);
-		buf[rc] = '\0';
-		log_to_amzmain(ANDROID_LOG_INFO, "drain_metrics", buf);
-	}
-
-skip_metrics:
-#endif
 
 	schedule_delayed_work(&info->battery_work,
 		msecs_to_jiffies(info->poll_interval));

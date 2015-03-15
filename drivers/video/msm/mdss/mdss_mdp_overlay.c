@@ -40,10 +40,15 @@
 #define CHECK_BOUNDS(offset, size, max_size) \
 	(((size) > (max_size)) || ((offset) > ((max_size) - (size))))
 
+#define IS_RIGHT_MIXER_OV(flags, dst_x, left_lm_w)	\
+	((flags & MDSS_MDP_RIGHT_MIXER) || (dst_x >= left_lm_w))
+
 #define PP_CLK_CFG_OFF 0
 #define PP_CLK_CFG_ON 1
 
 #define MEM_PROTECT_SD_CTRL 0xF
+
+#define OVERLAY_MAX 10
 
 struct sd_ctrl_req {
 	unsigned int enable;
@@ -54,6 +59,11 @@ static int mdss_mdp_overlay_free_fb_pipe(struct msm_fb_data_type *mfd);
 static int mdss_mdp_overlay_fb_parse_dt(struct msm_fb_data_type *mfd);
 static int mdss_mdp_overlay_off(struct msm_fb_data_type *mfd);
 static int mdss_mdp_overlay_splash_parse_dt(struct msm_fb_data_type *mfd);
+static inline u32 left_lm_w_from_mfd(struct msm_fb_data_type *mfd)
+{
+	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
+	return ctl->mixer_left->width;
+}
 
 static int mdss_mdp_overlay_sd_ctrl(struct msm_fb_data_type *mfd,
 					unsigned int enable)
@@ -93,17 +103,71 @@ static int mdss_mdp_overlay_get(struct msm_fb_data_type *mfd,
 	return 0;
 }
 
+/*
+ * This function is modified from mainline version. Source-split
+ * change is too large to port over onto certain code bases.
+ * Source-split patch added a new way to determine if layer
+ * is intended for right panel, by using x offset >= left LM
+ * This function corrects the x offset.
+ * Additionally, patches that fix other issues assumes that checks
+ * and corrections in this function are in place.
+ */
+static int mdss_mdp_ov_xres_check(struct msm_fb_data_type *mfd,
+	struct mdp_overlay *req)
+{
+	u32 xres = 0;
+	u32 left_lm_w = left_lm_w_from_mfd(mfd);
+	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
+
+	if (IS_RIGHT_MIXER_OV(req->flags, req->dst_rect.x, left_lm_w)) {
+		if (req->dst_rect.x >= left_lm_w) {
+			/*
+			 * this is a step towards removing a reliance on
+			 * MDSS_MDP_RIGHT_MIXER flags. With the new src split
+			 * code, some clients of non-src-split chipsets have
+			 * stopped sending MDSS_MDP_RIGHT_MIXER flag and
+			 * modified their xres relative to full panel
+			 * dimensions. In such cases, we need to deduct left
+			 * layer mixer width before we programm this HW.
+			 */
+			req->dst_rect.x -= left_lm_w;
+			req->flags |= MDSS_MDP_RIGHT_MIXER;
+		}
+
+		if (ctl->mixer_right) {
+			xres += ctl->mixer_right->width;
+		} else {
+			pr_err("ov cannot be placed on right mixer\n");
+			return -EPERM;
+		}
+	} else {
+		if (ctl->mixer_left) {
+			xres = ctl->mixer_left->width;
+		} else {
+			pr_err("ov cannot be placed on left mixer\n");
+			return -EPERM;
+		}
+	}
+
+	if (CHECK_BOUNDS(req->dst_rect.x, req->dst_rect.w, xres)) {
+		pr_err("dst_xres is invalid. dst_x:%d, dst_w:%d, xres:%d\n",
+			req->dst_rect.x, req->dst_rect.w, xres);
+		return -EOVERFLOW;
+	}
+
+	return 0;
+}
+
 int mdss_mdp_overlay_req_check(struct msm_fb_data_type *mfd,
 			       struct mdp_overlay *req,
 			       struct mdss_mdp_format_params *fmt)
 {
-	u32 xres, yres;
+	u32 yres;
 	u32 min_src_size, min_dst_size;
 	int content_secure;
 	struct mdss_data_type *mdata = mfd_to_mdata(mfd);
 	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
 
-	xres = mfd->fbi->var.xres;
 	yres = mfd->fbi->var.yres;
 
 	content_secure = (req->flags & MDP_SECURE_OVERLAY_SESSION);
@@ -155,14 +219,16 @@ int mdss_mdp_overlay_req_check(struct msm_fb_data_type *mfd,
 		} else if (req->flags & MDP_BWC_EN) {
 			pr_err("Decimation can't be enabled with BWC\n");
 			return -EINVAL;
+		} else if (fmt->tile) {
+			pr_err("Decimation can't be enabled with MacroTile format\n");
+			return -EINVAL;
 		}
 	}
 
 	if (!(req->flags & MDSS_MDP_ROT_ONLY)) {
 		u32 src_w, src_h, dst_w, dst_h;
 
-		if ((CHECK_BOUNDS(req->dst_rect.x, req->dst_rect.w, xres) ||
-		     CHECK_BOUNDS(req->dst_rect.y, req->dst_rect.h, yres))) {
+		if (CHECK_BOUNDS(req->dst_rect.y, req->dst_rect.h, yres)) {
 			pr_err("invalid destination rect=%d,%d,%d,%d\n",
 			       req->dst_rect.x, req->dst_rect.y,
 			       req->dst_rect.w, req->dst_rect.h);
@@ -223,7 +289,8 @@ int mdss_mdp_overlay_req_check(struct msm_fb_data_type *mfd,
 			}
 		}
 
-		if (req->flags & MDP_DEINTERLACE) {
+		if ((req->flags & MDP_DEINTERLACE) &&
+					!req->scale.enable_pxl_ext) {
 			if (req->flags & MDP_SOURCE_ROTATED_90) {
 				if ((req->src_rect.w % 4) != 0) {
 					pr_err("interlaced rect not h/4\n");
@@ -282,6 +349,79 @@ static int __mdp_pipe_tune_perf(struct mdss_mdp_pipe *pipe)
 	return 0;
 }
 
+static int __mdss_mdp_validate_pxl_extn(struct mdss_mdp_pipe *pipe)
+{
+	int plane;
+
+	for (plane = 0; plane < MAX_PLANES; plane++) {
+		u32 hor_req_pixels, hor_fetch_pixels;
+		u32 hor_ov_fetch, vert_ov_fetch;
+		u32 vert_req_pixels, vert_fetch_pixels;
+		u32 src_w = pipe->src.w >> pipe->horz_deci;
+		u32 src_h = pipe->src.h >> pipe->vert_deci;
+
+		/*
+		 * plane 1 and 2 are for chroma and are same. While configuring
+		 * HW, programming only one of the chroma components is
+		 * sufficient.
+		 */
+		if (plane == 2)
+			continue;
+
+		/*
+		 * For chroma plane, width is half for the following sub sampled
+		 * formats
+		 */
+		if (plane == 1 &&
+		    ((pipe->src_fmt->chroma_sample == MDSS_MDP_CHROMA_420) ||
+		     (pipe->src_fmt->chroma_sample == MDSS_MDP_CHROMA_H2V1)))
+			src_w >>= 1;
+
+		if (plane == 1 &&
+		    ((pipe->src_fmt->chroma_sample == MDSS_MDP_CHROMA_420) ||
+		     (pipe->src_fmt->chroma_sample == MDSS_MDP_CHROMA_H1V2)))
+			src_h >>= 1;
+
+		hor_req_pixels = pipe->scale.roi_w[plane] +
+			pipe->scale.num_ext_pxls_left[plane] +
+			pipe->scale.num_ext_pxls_right[plane];
+
+		hor_fetch_pixels = src_w +
+			pipe->scale.left_ftch[plane] +
+			pipe->scale.left_rpt[plane] +
+			pipe->scale.right_ftch[plane] +
+			pipe->scale.right_rpt[plane];
+
+		hor_ov_fetch = src_w + pipe->scale.left_ftch[plane] +
+			pipe->scale.right_ftch[plane];
+
+		vert_req_pixels = pipe->scale.num_ext_pxls_top[plane] +
+			pipe->scale.num_ext_pxls_btm[plane];
+
+		vert_fetch_pixels = pipe->scale.top_ftch[plane] +
+			pipe->scale.top_rpt[plane] +
+			pipe->scale.btm_ftch[plane] +
+			pipe->scale.btm_rpt[plane];
+
+		vert_ov_fetch = src_h + pipe->scale.top_ftch[plane] +
+			pipe->scale.btm_ftch[plane];
+
+		if ((hor_req_pixels != hor_fetch_pixels) ||
+			(hor_ov_fetch > pipe->img_width) ||
+			(vert_req_pixels != vert_fetch_pixels) ||
+			(vert_ov_fetch > pipe->img_height)) {
+			pr_err("err: h_req:%d h_fetch:%d v_req:%d v_fetch:%d src_img:[%d,%d]\n",
+					hor_req_pixels, hor_fetch_pixels,
+					vert_req_pixels, vert_fetch_pixels,
+					pipe->img_width, pipe->img_height);
+			pipe->scale.enable_pxl_ext = 0;
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
 static int __mdss_mdp_overlay_setup_scaling(struct mdss_mdp_pipe *pipe)
 {
 	u32 src;
@@ -289,8 +429,11 @@ static int __mdss_mdp_overlay_setup_scaling(struct mdss_mdp_pipe *pipe)
 
 	src = pipe->src.w >> pipe->horz_deci;
 
-	if (pipe->scale.enable_pxl_ext)
-		return 0;
+	if (pipe->scale.enable_pxl_ext) {
+		rc = __mdss_mdp_validate_pxl_extn(pipe);
+		return rc;
+	}
+
 	memset(&pipe->scale, 0, sizeof(struct mdp_scale_data));
 	rc = mdss_mdp_calc_phase_step(src, pipe->dst.w,
 			&pipe->scale.phase_step_x[0]);
@@ -353,6 +496,7 @@ static int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 	struct mdp_histogram_start_req hist;
 	int ret;
 	u32 bwc_enabled;
+	u32 left_lm_w = left_lm_w_from_mfd(mfd);
 
 	if (mdp5_data->ctl == NULL)
 		return -ENODEV;
@@ -368,7 +512,7 @@ static int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 		return -EOVERFLOW;
 	}
 
-	if (req->flags & MDSS_MDP_RIGHT_MIXER)
+	if (IS_RIGHT_MIXER_OV(req->flags, req->dst_rect.x, left_lm_w))
 		mixer_mux = MDSS_MDP_MIXER_MUX_RIGHT;
 	else
 		mixer_mux = MDSS_MDP_MIXER_MUX_LEFT;
@@ -385,6 +529,10 @@ static int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 		pr_err("invalid pipe format %d\n", req->src.format);
 		return -EINVAL;
 	}
+
+	ret = mdss_mdp_ov_xres_check(mfd, req);
+	if (ret)
+		return ret;
 
 	ret = mdss_mdp_overlay_req_check(mfd, req, fmt);
 	if (ret)
@@ -523,7 +671,8 @@ static int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 		pipe->overfetch_disable = OVERFETCH_DISABLE_BOTTOM;
 
 		if (!(pipe->flags & MDSS_MDP_DUAL_PIPE) ||
-				(pipe->flags & MDSS_MDP_RIGHT_MIXER))
+				IS_RIGHT_MIXER_OV(req->flags,
+					req->dst_rect.x, left_lm_w))
 			pipe->overfetch_disable |= OVERFETCH_DISABLE_RIGHT;
 		pr_debug("overfetch flags=%x\n", pipe->overfetch_disable);
 	} else {
@@ -589,17 +738,14 @@ static int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 	 * When scaling is enabled src crop and image
 	 * width and height is modified by user
 	 */
-	if ((pipe->flags & MDP_DEINTERLACE)) {
+	if ((pipe->flags & MDP_DEINTERLACE) && !pipe->scale.enable_pxl_ext) {
 		if (pipe->flags & MDP_SOURCE_ROTATED_90) {
 			pipe->src.x = DIV_ROUND_UP(pipe->src.x, 2);
 			pipe->src.x &= ~1;
-			if (!pipe->scale.enable_pxl_ext) {
-				pipe->src.w /= 2;
-				pipe->img_width /= 2;
-			}
+			pipe->src.w /= 2;
+			pipe->img_width /= 2;
 		} else {
-			if (!pipe->scale.enable_pxl_ext)
-				pipe->src.h /= 2;
+			pipe->src.h /= 2;
 			pipe->src.y = DIV_ROUND_UP(pipe->src.y, 2);
 			pipe->src.y &= ~1;
 		}
@@ -1365,8 +1511,13 @@ static void mdss_mdp_overlay_force_dma_cleanup(struct mdss_data_type *mdata)
 
 	for (i = 0; i < mdata->ndma_pipes; i++) {
 		pipe = mdata->dma_pipes + i;
-		if (atomic_read(&pipe->ref_cnt) && pipe->mfd)
-			mdss_mdp_overlay_force_cleanup(pipe->mfd);
+
+		if (!mdss_mdp_pipe_map(pipe)) {
+			struct msm_fb_data_type *mfd = pipe->mfd;
+			mdss_mdp_pipe_unmap(pipe);
+			if (mfd)
+				mdss_mdp_overlay_force_cleanup(mfd);
+		}
 	}
 }
 
@@ -2281,6 +2432,7 @@ static int __handle_overlay_prepare(struct msm_fb_data_type *mfd,
 	int ret = 0, left_cnt = 0, right_cnt = 0;
 	int i;
 	u32 new_reqs = 0;
+	u32 left_lm_w = left_lm_w_from_mfd(mfd);
 
 	ret = mutex_lock_interruptible(&mdp5_data->ov_lock);
 	if (ret)
@@ -2308,7 +2460,7 @@ static int __handle_overlay_prepare(struct msm_fb_data_type *mfd,
 		if (pipe->play_cnt == 0)
 			new_reqs |= pipe->ndx;
 
-		if (pipe->flags & MDSS_MDP_RIGHT_MIXER) {
+		if (IS_RIGHT_MIXER_OV(req->flags, req->dst_rect.x, left_lm_w)) {
 			if (right_cnt >= MDSS_MDP_MAX_STAGE) {
 				pr_err("too many pipes on right mixer\n");
 				ret = -EINVAL;
@@ -2344,11 +2496,17 @@ static int __handle_ioctl_overlay_prepare(struct msm_fb_data_type *mfd,
 		void __user *argp)
 {
 	struct mdp_overlay_list ovlist;
+	struct mdp_overlay *req_list[OVERLAY_MAX];
 	struct mdp_overlay *overlays;
 	int i, ret;
 
 	if (copy_from_user(&ovlist, argp, sizeof(ovlist)))
 		return -EFAULT;
+
+	if (ovlist.num_overlays >= OVERLAY_MAX) {
+		pr_err("Number of overlays exceeds max\n");
+		return -EINVAL;
+	}
 
 	overlays = kmalloc(ovlist.num_overlays * sizeof(*overlays), GFP_KERNEL);
 	if (!overlays) {
@@ -2356,8 +2514,14 @@ static int __handle_ioctl_overlay_prepare(struct msm_fb_data_type *mfd,
 		return -ENOMEM;
 	}
 
+	if (copy_from_user(req_list, ovlist.overlay_list,
+				sizeof(struct mdp_overlay*) * ovlist.num_overlays)) {
+		ret = -EFAULT;
+		goto validate_exit;
+	}
+
 	for (i = 0; i < ovlist.num_overlays; i++) {
-		if (copy_from_user(overlays + i, ovlist.overlay_list[i],
+		if (copy_from_user(overlays + i, req_list[i],
 				sizeof(struct mdp_overlay))) {
 			ret = -EFAULT;
 			goto validate_exit;
@@ -2367,7 +2531,7 @@ static int __handle_ioctl_overlay_prepare(struct msm_fb_data_type *mfd,
 	ret = __handle_overlay_prepare(mfd, &ovlist, overlays);
 	if (!IS_ERR_VALUE(ret)) {
 		for (i = 0; i < ovlist.num_overlays; i++) {
-			if (copy_to_user(ovlist.overlay_list[i], overlays + i,
+			if (copy_to_user(req_list[i], overlays + i,
 					sizeof(struct mdp_overlay))) {
 				ret = -EFAULT;
 				goto validate_exit;
@@ -2988,7 +3152,10 @@ int mdss_mdp_overlay_init(struct msm_fb_data_type *mfd)
 			pr_err("Error dfps sysfs creation ret=%d\n", rc);
 			goto init_fail;
 		}
-	} else if (mfd->panel_info->type == MIPI_CMD_PANEL) {
+	}
+
+	if (mfd->panel_info->mipi.dynamic_switch_enabled ||
+			mfd->panel_info->type == MIPI_CMD_PANEL) {
 		rc = __vsync_retire_setup(mfd);
 		if (IS_ERR_VALUE(rc)) {
 			pr_err("unable to create vsync timeline\n");
