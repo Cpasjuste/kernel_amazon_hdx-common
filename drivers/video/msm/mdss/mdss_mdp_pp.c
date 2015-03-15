@@ -1556,11 +1556,7 @@ static int pp_dspp_setup(u32 disp_num, struct mdss_mdp_mixer *mixer)
 	mixer_cnt = mdss_mdp_get_ctl_mixers(disp_num, mixer_id);
 	if (dspp_num < mdata->nad_cfgs && disp_num < mdata->nad_cfgs &&
 				(mixer_cnt <= mdata->nmax_concurrent_ad_hw)) {
-#ifdef CONFIG_ARCH_MSM8974_APOLLO
-		ad = &mdata->ad_cfgs[dspp_num];
-#else
 		ad = &mdata->ad_cfgs[disp_num];
-#endif
 		ad_flags = ad->reg_sts;
 		ad_hw = &mdata->ad_off[dspp_num];
 	} else {
@@ -1751,11 +1747,9 @@ int mdss_mdp_pp_resume(struct mdss_mdp_ctl *ctl, u32 dspp_num)
 	disp_num = ctl->mfd->index;
 
 	if (dspp_num < mdata->nad_cfgs) {
-#ifdef CONFIG_ARCH_MSM8974_APOLLO
-		ad = &mdata->ad_cfgs[dspp_num];
-#else
-		ad = &mdata->ad_cfgs[disp_num];
-#endif
+		ret = mdss_mdp_get_ad(ctl->mfd, &ad);
+		if (ret)
+			return ret;
 
 		if (PP_AD_STATE_CFG & ad->state)
 			pp_ad_cfg_write(&mdata->ad_off[dspp_num], ad);
@@ -1907,6 +1901,7 @@ int mdss_mdp_pp_init(struct device *dev)
 	mutex_unlock(&mdss_pp_mutex);
 	return ret;
 }
+
 void mdss_mdp_pp_term(struct device *dev)
 {
 	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
@@ -3093,7 +3088,7 @@ static int pp_histogram_enable(struct pp_hist_col_info *hist_info,
 	hist_info->col_en = true;
 	spin_unlock_irqrestore(&hist_info->hist_lock, flag);
 	hist_info->frame_cnt = req->frame_cnt;
-	init_completion(&hist_info->comp);
+	INIT_COMPLETION(hist_info->comp);
 	INIT_COMPLETION(hist_info->first_kick);
 	hist_info->hist_cnt_read = 0;
 	hist_info->hist_cnt_sent = 0;
@@ -4199,7 +4194,7 @@ error:
 	if (!ret) {
 		if (wait) {
 			mutex_lock(&ad->lock);
-			init_completion(&ad->comp);
+			INIT_COMPLETION(ad->comp);
 			mutex_unlock(&ad->lock);
 		}
 		if (wait) {
@@ -4837,7 +4832,8 @@ static int is_valid_calib_ctrl_addr(char __iomem *ptr)
 			break;
 		}
 
-		for (stage = 0; stage < mdss_res->nmixers_intf; stage++)
+		for (stage = 0; stage < (mdss_res->nmixers_intf +
+					 mdss_res->nmixers_wb); stage++)
 			if (ptr == base + MDSS_MDP_REG_CTL_LAYER(stage)) {
 				ret = MDP_PP_OPS_READ | MDP_PP_OPS_WRITE;
 				goto End;
