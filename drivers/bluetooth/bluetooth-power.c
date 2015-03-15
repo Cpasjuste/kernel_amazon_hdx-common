@@ -137,9 +137,11 @@ static int bt_configure_vreg(struct bt_power_vreg_data *vreg)
 	BT_PWR_DBG("config %s", vreg->name);
 
 	/* Get the regulator handle for vreg */
+	if (!(vreg->reg)) {
 		rc = bt_vreg_init(vreg);
 		if (rc < 0)
 			return rc;
+	}
 	rc = bt_vreg_enable(vreg);
 
 	return rc;
@@ -191,15 +193,12 @@ static int bluetooth_power(int on)
 	BT_PWR_DBG("on: %d", on);
 
 	if (on) {
-		if (bt_power_pdata->bt_vdd_pa) {
-			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_pa);
+		if (bt_power_pdata->bt_vdd_io) {
+			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_io);
 			if (rc < 0) {
-				BT_PWR_ERR("bt_power vddpa config failed");
+				BT_PWR_ERR("bt_power vddio config failed");
 				goto out;
 			}
-			regulator_set_optimum_mode(
-				bt_power_pdata->bt_vdd_pa->reg,
-				BT_VDD_PA_CURRENT);
 		}
 		if (bt_power_pdata->bt_vdd_ldo) {
 			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_ldo);
@@ -208,11 +207,11 @@ static int bluetooth_power(int on)
 				goto vdd_ldo_fail;
 			}
 		}
-		if (bt_power_pdata->bt_vdd_io) {
-			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_io);
+		if (bt_power_pdata->bt_vdd_pa) {
+			rc = bt_configure_vreg(bt_power_pdata->bt_vdd_pa);
 			if (rc < 0) {
-				BT_PWR_ERR("bt_power vddio config failed");
-				goto vdd_io_fail;
+				BT_PWR_ERR("bt_power vddpa config failed");
+				goto vdd_pa_fail;
 			}
 			regulator_set_optimum_mode(
 				bt_power_pdata->bt_vdd_pa->reg,
@@ -238,18 +237,12 @@ gpio_fail:
 		if (bt_power_pdata->bt_gpio_sys_rst)
 			gpio_free(bt_power_pdata->bt_gpio_sys_rst);
 		bt_vreg_disable(bt_power_pdata->bt_chip_pwd);
-		if (bt_power_pdata->bt_chip_pwd->reg)
-			regulator_put(bt_power_pdata->bt_chip_pwd->reg);
 chip_pwd_fail:
-		bt_vreg_disable(bt_power_pdata->bt_vdd_io);
-		if (bt_power_pdata->bt_vdd_io->reg)
-			regulator_put(bt_power_pdata->bt_vdd_io->reg);
-vdd_io_fail:
+		bt_vreg_disable(bt_power_pdata->bt_vdd_pa);
+vdd_pa_fail:
 		bt_vreg_disable(bt_power_pdata->bt_vdd_ldo);
 vdd_ldo_fail:
-		bt_vreg_disable(bt_power_pdata->bt_vdd_pa);
-		if (bt_power_pdata->bt_vdd_pa->reg)
-			regulator_put(bt_power_pdata->bt_vdd_pa->reg);
+		bt_vreg_disable(bt_power_pdata->bt_vdd_io);
 	}
 
 out:
@@ -504,4 +497,3 @@ MODULE_VERSION("1.40");
 
 module_init(bluetooth_power_init);
 module_exit(bluetooth_power_exit);
-

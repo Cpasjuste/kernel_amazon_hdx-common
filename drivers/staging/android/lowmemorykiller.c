@@ -41,7 +41,6 @@
 #include <linux/delay.h>
 #include <linux/swap.h>
 #include <linux/fs.h>
-#include <linux/trapz.h>
 
 #ifdef CONFIG_HIGHMEM
 #define _ZONE ZONE_HIGHMEM
@@ -341,10 +340,6 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 		lowmem_print(1, "send sigkill to %d (%s), adj %d, size %d\n",
 			     selected->pid, selected->comm,
 			     selected_oom_score_adj, selected_tasksize);
-		TRAPZ_DESCRIBE(TRAPZ_KERN_MEM, lmkk,
-				"Low memory killer killed");
-		TRAPZ_LOG(TRAPZ_LOG_VERBOSE, 0, TRAPZ_KERN_MEM, lmkk,
-				selected->pid, selected_tasksize, 0, 0);
 		lowmem_deathpending_timeout = jiffies + HZ;
 		send_sig(SIGKILL, selected, 0);
 		set_tsk_thread_flag(selected, TIF_MEMDIE);
