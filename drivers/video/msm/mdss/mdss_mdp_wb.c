@@ -713,7 +713,7 @@ int mdss_mdp_wb_get_format(struct msm_fb_data_type *mfd,
 	return 0;
 }
 
-int mdss_mdp_wb_set_format(struct msm_fb_data_type *mfd, int dst_format)
+int mdss_mdp_wb_set_format(struct msm_fb_data_type *mfd, u32 dst_format)
 {
 	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
 
