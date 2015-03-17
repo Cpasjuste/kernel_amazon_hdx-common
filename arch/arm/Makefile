@@ -21,6 +21,9 @@ GZFLAGS		:=-9
 # Explicitly specifiy 32-bit ARM ISA since toolchain default can be -mthumb:
 KBUILD_CFLAGS	+=$(call cc-option,-marm,)
 
+# Disable sizeof-pointer-memaccess errors with cm-12.0 toolchain
+KBUILD_CFLAGS   +=-Wno-sizeof-pointer-memaccess
+
 # Never generate .eh_frame
 KBUILD_CFLAGS	+= $(call cc-option,-fno-dwarf2-cfi-asm)
 

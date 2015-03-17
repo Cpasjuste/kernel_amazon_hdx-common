@@ -22,7 +22,7 @@
 #include <linux/types.h>
 
 struct ion_handle;
-typedef int ion_user_handle_t;
+typedef struct ion_handle *ion_user_handle_t;
 
 /**
  * enum ion_heap_types - list of all possible types of heaps
